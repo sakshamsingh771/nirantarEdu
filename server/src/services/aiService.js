@@ -1,0 +1,312 @@
+const crypto = require("crypto");
+const { generateWithFallback, generateStreamWithFallback, isOllamaReachable, NUM_PREDICT_STRUCTURED, activeMode } = require("./aiProviders");
+const conversationManager = require("./conversationManager");
+
+// Upper bound so a very large question count still can't trigger an
+// unbounded/slow generation request against Ollama running on modest
+// school-server hardware.
+const STRUCTURED_HARD_CEILING = 6000;
+
+// Builds a role- and class-appropriate system prompt. A Class 8 Science
+// question and a Class 12 Physics question should not get the same depth of
+// explanation, and a teacher's assistant has different capabilities (lesson
+// planning, coding help, assignment drafting) than a student's (guided
+// explanations rather than just handing over homework answers). This same
+// prompt is handed to whichever provider (cloud or Ollama) ends up serving
+// the request — see aiProviders/index.js — so Nirantar AI's personality and
+// instructions don't shift when the provider does.
+function buildSystemPrompt({ role, cls, subject } = {}) {
+  const contextLine = [subject ? `Subject: ${subject}` : null, cls ? `Class: ${cls}` : null]
+    .filter(Boolean)
+    .join(", ");
+
+  if (role === "TEACHER" || role === "ADMIN") {
+    return (
+      "You are Nirantar AI, a teaching-assistant for school staff. You can help draft lesson plans, explain " +
+      "concepts, write and explain code, suggest practice/assignment questions, and summarize material. " +
+      "Be direct and practical — the person using you is a teacher, not a student." +
+      (contextLine ? ` Current context — ${contextLine}.` : "")
+    );
+  }
+
+  const level = classDepthHint(cls);
+  return (
+    "You are Nirantar AI, a helpful study assistant for a school student in India. Explain concepts clearly " +
+    `with simple examples${level ? `, at a level appropriate for ${level}` : ""}. Guide the student's ` +
+    "understanding rather than just handing over finished homework answers — encourage them to reason " +
+    "through problems. Keep explanations educationally appropriate and avoid unnecessary complexity." +
+    (contextLine ? ` Current context — ${contextLine}.` : "")
+  );
+}
+
+function classDepthHint(cls) {
+  const n = Number(cls);
+  if (!n) return "";
+  if (n <= 5) return "a young primary-school student — use very simple language and everyday examples";
+  if (n <= 8) return "a middle-school student";
+  if (n <= 10) return "a secondary-school student preparing for board-level exams";
+  return "a senior-secondary student — more advanced, exam-oriented depth is appropriate";
+}
+
+// Builds the final prompt: system-level instructions stay in `system` (sent
+// separately to whichever provider), while conversation history + any RAG
+// material context + the new question are woven into one prompt body. This
+// is what makes conversation continuity provider-independent — history is
+// plain text handed to whichever provider answers, not a provider-native
+// "thread"/"session" concept that would break on fallback.
+function buildPrompt(userMessage, materialContext, historyText) {
+  const parts = [];
+  if (historyText) parts.push(`Previous conversation:\n${historyText}`);
+  if (materialContext) parts.push(`Relevant study material:\n${materialContext}`);
+  parts.push(`${historyText ? "Current question" : "Question"}: ${userMessage}`);
+  return parts.join("\n\n");
+}
+
+/**
+ * Non-streaming chat. `convo` (optional) is { conversationId, user,
+ * namespace } — when provided, prior turns are fetched and replayed as
+ * context, and both the student's message and the reply are persisted so
+ * the conversation survives a provider switch on the next turn.
+ */
+async function chatWithNirantarAI(userMessage, context = "", userInfo = {}, convo = null) {
+  const system = buildSystemPrompt(userInfo);
+  let conversationId = convo?.conversationId;
+  let historyText = "";
+
+  if (convo?.user) {
+    conversationId = conversationId || crypto.randomUUID();
+    const ctx = await conversationManager.getConversationContext(conversationId, convo.user);
+    historyText = ctx.historyText;
+    await conversationManager.appendMessage(conversationId, convo.user, convo.namespace, {
+      role: "user",
+      content: userMessage,
+    });
+  }
+
+  const prompt = buildPrompt(userMessage, context, historyText);
+  const { text, provider, model } = await generateWithFallback(prompt, { system });
+
+  if (convo?.user) {
+    await conversationManager.appendMessage(conversationId, convo.user, convo.namespace, {
+      role: "assistant",
+      content: text,
+      provider,
+      model,
+    });
+  }
+
+  return { reply: text, provider, model, conversationId };
+}
+
+/**
+ * Streaming chat. Returns { stream, provider, model, conversationId }
+ * immediately (provider/model reflect whichever one actually started
+ * producing content, after any early fallback — see aiProviders/index.js).
+ * The CALLER (aiController) is responsible for accumulating the streamed
+ * text and calling `persistAssistantReply` once the stream ends, since only
+ * the controller knows the full text has actually reached the client.
+ */
+async function chatStreamWithNirantarAI(userMessage, context = "", userInfo = {}, convo = null) {
+  const system = buildSystemPrompt(userInfo);
+  let conversationId = convo?.conversationId;
+  let historyText = "";
+
+  if (convo?.user) {
+    conversationId = conversationId || crypto.randomUUID();
+    const ctx = await conversationManager.getConversationContext(conversationId, convo.user);
+    historyText = ctx.historyText;
+    await conversationManager.appendMessage(conversationId, convo.user, convo.namespace, {
+      role: "user",
+      content: userMessage,
+    });
+  }
+
+  const prompt = buildPrompt(userMessage, context, historyText);
+  const { stream, provider, model } = await generateStreamWithFallback(prompt, { system });
+  return { stream, provider, model, conversationId };
+}
+
+async function persistAssistantReply(conversationId, user, namespace, text, provider, model) {
+  if (!conversationId || !user || !text) return;
+  await conversationManager.appendMessage(conversationId, user, namespace, {
+    role: "assistant",
+    content: text,
+    provider,
+    model,
+  });
+}
+
+async function summarizeText(text) {
+  const system = "You summarize study material for students into clear, concise study notes.";
+  const { text: summary } = await generateWithFallback(`Summarize the following material into key study points:\n\n${text}`, { system });
+  return summary;
+}
+
+async function generateQuizQuestions(topic, count = 5) {
+  // Hard prompt enforcement to ensure compliance across small/local LLMs
+  const system =
+    "You are a strict JSON data generator. Generate quiz questions for school students. " +
+    "You must respond ONLY with a raw JSON array. Do not wrap the JSON in markdown code blocks like ```json. " +
+    "Do not include any greeting text, intro, or outro text. Output nothing but valid JSON. " +
+    'Format: [{"type":"MCQ","text":"...","options":["A","B","C","D"],"correctAnswer":"0","marks":1}]. ' +
+    'Use type values: MCQ, TRUE_FALSE, FILL_BLANK, or SHORT_ANSWER.';
+    
+  const prompt = `Generate exactly ${count} quiz questions about the following topic: ${topic}. Verify that the JSON array is completely closed at the end.`;
+
+  // DANGEROUS UNDERFLOW FIXED: Ensure we allocate a massive token runway for large quiz requests
+  // so the response string never gets clipped short mid-generation.
+  const tokenRunway = Math.max(8000, count * 350); 
+  const numPredict = Math.min(STRUCTURED_HARD_CEILING, tokenRunway);
+
+  console.log(`[NirantarAi] Generating ${count} questions. Allocating ${numPredict} tokens...`);
+
+  const { text: raw } = await generateWithFallback(prompt, { 
+    system, 
+    temperature: 0.3, // Lower temperature means less random hallucination and stricter format adherence
+    numPredict 
+  });
+  
+  return parseJsonResponse(raw, "AI returned an unparseable response. Try again.");
+}
+
+
+async function generateAssignmentContent(
+  topic,
+  { subject, class: cls, difficulty = "Medium", questionCount = 5, questionType = "MIXED", marks } = {}
+) {
+  const system =
+    "You draft school assignments for teachers to review and edit before publishing. " +
+    "Respond ONLY with valid JSON, no preamble, no markdown fences, no explanation outside the JSON. " +
+    'Format: {"title":"...","instructions":"...","questions":[{"text":"...","type":"MCQ|TRUE_FALSE|FILL_BLANK|SHORT_ANSWER","marks":2,"expectedAnswer":"..."}]}. ' +
+    "The `instructions` field must read like a clean, teacher-written assignment sheet, not raw AI output: " +
+    "use Markdown — a short heading, then a brief 1-2 sentence overview paragraph, then clear numbered " +
+    "instructions/steps for the student (blank lines between items), and bullet points only where genuinely " +
+    "helpful (e.g. materials needed). Keep it concise and well spaced — no walls of text, no run-on paragraphs. " +
+    "Question text itself stays in the `questions` array, not folded into `instructions`.";
+  const typeLine = questionType === "MIXED" ? "a mix of question types" : `all questions of type ${questionType}`;
+  const context = [subject ? `Subject: ${subject}` : null, cls ? `Class: ${cls}` : null].filter(Boolean).join(", ");
+  const prompt =
+    `Draft a ${difficulty}-difficulty assignment about: ${topic}${context ? ` (${context})` : ""}. ` +
+    `Include exactly ${questionCount} questions, ${typeLine}` +
+    (marks ? `, totaling approximately ${marks} marks.` : ".");
+
+  const numPredict = Math.min(STRUCTURED_HARD_CEILING, Math.max(NUM_PREDICT_STRUCTURED, questionCount * 180));
+  const { text: raw } = await generateWithFallback(prompt, { system, temperature: 0.6, numPredict });
+  try {
+    const parsed = parseJsonResponse(raw);
+    return {
+      title: parsed.title || `Assignment: ${topic}`,
+      instructions: parsed.instructions || "",
+      questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    };
+  } catch {
+    // Fall back to using the raw text as instructions rather than failing
+    // outright — the teacher reviews and edits either way before publishing.
+    return { title: `Assignment: ${topic}`, instructions: raw.trim(), questions: [] };
+  }
+}
+
+// Robust JSON extraction: strips ```json fences (some providers/models wrap
+// structured output in them despite being told not to), and if there's
+// still leading/trailing prose around the JSON, extracts the outermost
+// {...} or [...] block rather than failing outright.
+function parseJsonResponse(rawText, fallbackErrorMessage) {
+  try {
+    if (!rawText) {
+      throw new Error("Empty response received from AI model.");
+    }
+
+    let cleanText = rawText.trim();
+    
+    // 1. Strip markdown fences if present
+    if (cleanText.startsWith("```")) {
+      cleanText = cleanText.replace(/^```(?:json)?/, "").replace(/```$/, "").trim();
+    }
+    
+    // 2. Isolate JSON bounds
+    const firstBrace = cleanText.indexOf("{");
+    const firstBracket = cleanText.indexOf("[");
+    
+    let startIndex = -1;
+    let endIndex = -1;
+    let expectedClose = "";
+
+    if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
+      startIndex = firstBracket;
+      endIndex = cleanText.lastIndexOf("]");
+      expectedClose = "]";
+    } else if (firstBrace !== -1) {
+      startIndex = firstBrace;
+      endIndex = cleanText.lastIndexOf("}");
+      expectedClose = "}";
+    }
+    
+    if (startIndex !== -1) {
+      if (endIndex !== -1 && endIndex > startIndex) {
+        cleanText = cleanText.substring(startIndex, endIndex + 1);
+      } else {
+        cleanText = cleanText.substring(startIndex);
+        cleanText = cleanText.replace(/,?\s*\{\s*[^}]*$/, ""); 
+        cleanText += expectedClose;
+      }
+    }
+
+    // ======= ADD THIS TRANSFORMATION LAYER TO FIX THE }} SYNTAX BUG =======
+    // Fixes the double-brace mistake the AI is making on question items
+    cleanText = cleanText.replace(/\}\s*\}/g, "}"); // Converts any accidental }} back to }
+    cleanText = cleanText.replace(/\{\s*\{/g, "{"); // Converts any accidental {{ back to {
+    // =====================================================================
+    
+    // 3. Initial JSON Parse
+    const parsedData = JSON.parse(cleanText);
+    
+    // ======= SCHEMA REPAIR & VALIDATION LAYER =======
+    const targetArray = Array.isArray(parsedData) ? parsedData : [parsedData];
+    
+    const correctedQuizQuestions = targetArray.map((q, idx) => {
+      const correctedType = ["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].includes(q.type?.toUpperCase())
+        ? q.type.toUpperCase()
+        : "MCQ";
+
+      const rawOptions = Array.isArray(q.options) ? q.options : ["True", "False", "None", "All"];
+      
+      // Smart recovery layer: if AI supplies an option text string like "speed" instead of an index
+      let correctedAns = q.correctAnswer !== undefined ? String(q.correctAnswer).trim() : "0";
+      const matchingIndex = rawOptions.findIndex(opt => opt.toLowerCase() === correctedAns.toLowerCase());
+      if (matchingIndex !== -1) {
+        correctedAns = String(matchingIndex);
+      }
+
+      return {
+        type: correctedType,
+        text: q.text || q.question || `Practice Question ${idx + 1}`,
+        options: rawOptions,
+        correctAnswer: correctedAns,
+        marks: Number(q.marks) || 1
+      };
+    });
+
+    return correctedQuizQuestions;
+    
+  } catch (err) {
+    console.error("Quiz Validation Exception Catch:", err.message);
+    console.error("Faulty text trace:", rawText);
+    throw new Error(fallbackErrorMessage || "AI returned an unparseable response. Try again.");
+  }
+}
+
+
+
+
+module.exports = {
+  isOllamaReachable,
+  activeMode,
+  chatWithNirantarAI,
+  chatStreamWithNirantarAI,
+  persistAssistantReply,
+  summarizeText,
+  generateQuizQuestions,
+  generateAssignmentContent,
+  buildSystemPrompt,
+  parseJsonResponse
+};

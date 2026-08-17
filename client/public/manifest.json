@@ -1,0 +1,9 @@
+{
+  "name": "NirantarEdu",
+  "short_name": "NirantarEdu",
+  "description": "Offline-first school learning platform",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#1e3a5f",
+  "background_color": "#ffffff"
+}

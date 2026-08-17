@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: nirantaredu-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: nirantar
+      MONGO_INITDB_ROOT_PASSWORD: nirantar_local_pw
+      MONGO_INITDB_DATABASE: nirantaredu
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - nirantar_net
+
+  # Ollama is NOT run as a container here — it runs as a local install on the
+  # school server's host machine (https://ollama.com). The backend reaches it
+  # through OLLAMA_BASE_URL below. `extra_hosts` is what makes
+  # host.docker.internal resolve on Linux Docker Engine (Docker Desktop on
+  # Mac/Windows already provides it for free).
+  backend:
+    build: ./server
+    container_name: nirantaredu-backend
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      MONGO_URI: mongodb://nirantar:nirantar_local_pw@mongodb:27017/nirantaredu?authSource=admin
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - uploads_data:/app/uploads
+    networks:
+      - nirantar_net
+
+  frontend:
+    build: ./client
+    container_name: nirantaredu-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    networks:
+      - nirantar_net
+
+networks:
+  nirantar_net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  uploads_data:

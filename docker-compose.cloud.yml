@@ -1,0 +1,54 @@
+# Cloud deployment. Unlike docker-compose.yml (local/offline), there is no
+# mongodb service here — the backend connects to MongoDB Atlas — and no
+# assumption about Ollama running on this same host, since it's expected to
+# run on its own cloud VM (see .env.production.example). Only two services
+# run here: backend and frontend.
+#
+# Usage: docker compose -f docker-compose.cloud.yml --env-file .env up -d
+# (.env should be a copy of .env.production.example with real values filled in)
+
+version: "3.9"
+
+services:
+  backend:
+    build: ./server
+    container_name: nirantaredu-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      # MONGODB_URI, OLLAMA_BASE_URL, AI_PROVIDER, AI_API_KEY, AI_MODEL,
+      # FRONTEND_URL, JWT_SECRET all come from .env (see
+      # .env.production.example) — nothing cloud-specific is hardcoded here, so the same server image works local or cloud.
+    volumes:
+      # Persistent disk for uploaded materials so they survive container
+      # restarts/redeploys. Point this at your cloud provider's persistent
+      # volume/disk mount in production (e.g. an AWS EBS volume, a GCP
+      # persistent disk, or a mounted block-storage path) rather than the
+      # default local Docker volume shown here, which lives only on this
+      # single host.
+      - uploads_data:/app/uploads
+    networks:
+      - nirantar_net
+
+  frontend:
+    build: ./client
+    container_name: nirantaredu-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443" # terminate TLS here or in front of this (load balancer/reverse proxy)
+    networks:
+      - nirantar_net
+
+networks:
+  nirantar_net:
+    driver: bridge
+
+volumes:
+  uploads_data:
