@@ -1,4 +1,4 @@
-# NirantarEdu — 100% Offline-First School Learning Platform
+# NirantarEdu — 100% Offline-School Learning Platform
 
 > Internet can disappear. Learning doesn't have to.
 
