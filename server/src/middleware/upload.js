@@ -34,7 +34,7 @@ const ALLOWED_MIME = [
 // Kept generous but bounded given this runs on modest on-prem school
 // hardware per NirantarEdu's offline-first architecture.
 const MAX_MB_BY_TYPE = {
-  "application/pdf": Number(process.env.MAX_UPLOAD_MB_DOC || 50),
+  "application/pdf": Number(process.env.MAX_UPLOAD_MB_PDF || 100),
   "text/plain": Number(process.env.MAX_UPLOAD_MB_DOC || 50),
   "image/png": Number(process.env.MAX_UPLOAD_MB_IMAGE || 25),
   "image/jpeg": Number(process.env.MAX_UPLOAD_MB_IMAGE || 25),

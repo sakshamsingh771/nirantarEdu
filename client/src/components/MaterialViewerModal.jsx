@@ -1,4 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Set worker source using a stable CDN/bundle-safe URL matching the pdfjs-dist version
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 const PREVIEWABLE_TYPES = ["PDF", "IMAGE", "VIDEO", "AUDIO"];
 
@@ -8,13 +12,6 @@ export default function MaterialViewerModal({ material, onClose }) {
   const isTxt = material.fileExtension === "txt" || material.type === "NOTE";
   const closingViaHistoryRef = useRef(false);
 
-  // Root-cause fix for "open material → press Back → logged out": opening
-  // this modal used to be pure React state with no browser-history entry of
-  // its own, so pressing Back skipped straight past the dashboard to
-  // whatever page was open before it (often the login screen), which LOOKED
-  // like a forced logout. Pushing a history entry here means Back closes
-  // the viewer and lands back on Materials, same as Close does — the
-  // student's session/token is never touched either way.
   useEffect(() => {
     window.history.pushState({ nirantarMaterialViewer: true }, "");
     const onPopState = () => {
@@ -24,9 +21,6 @@ export default function MaterialViewerModal({ material, onClose }) {
     window.addEventListener("popstate", onPopState);
     return () => {
       window.removeEventListener("popstate", onPopState);
-      // If we're unmounting because Close was clicked (not because the user
-      // already navigated back), remove the history entry we added so it
-      // doesn't linger as a dead "step" the user has to click Back through.
       if (!closingViaHistoryRef.current) {
         window.history.back();
       }
@@ -83,7 +77,6 @@ export default function MaterialViewerModal({ material, onClose }) {
 function ViewerBody({ material, txtContent, txtError, isTxt }) {
   const { type, filePath, textContent } = material;
 
-  // NOTE materials have no file at all — their text IS the content.
   if (type === "NOTE" && !filePath) {
     return (
       <div className="mx-auto max-w-2xl rounded-lg bg-canvas-card p-6">
@@ -108,16 +101,7 @@ function ViewerBody({ material, txtContent, txtError, isTxt }) {
   }
 
   if (type === "PDF") {
-    // The browser's native PDF viewer (rendered via iframe against a
-    // Content-Disposition: inline response) already provides zoom, search
-    // and page navigation — no extra pdf.js dependency needed for that.
-    return (
-      <iframe
-        src={filePath}
-        title={material.title}
-        className="mx-auto h-[80vh] w-full max-w-5xl rounded-lg border border-brand-100 bg-canvas-card"
-      />
-    );
+    return <PdfViewer filePath={filePath} title={material.title} />;
   }
 
   if (type === "IMAGE") {
@@ -148,9 +132,6 @@ function ViewerBody({ material, txtContent, txtError, isTxt }) {
     );
   }
 
-  // PPT/DOC formats: no offline in-app renderer exists in this project
-  // (would require a new heavy dependency like docx-preview/pptx viewer),
-  // so this is an honest fallback rather than a fake preview.
   return (
     <div className="mx-auto max-w-md rounded-lg bg-canvas-card p-8 text-center">
       <p className="text-sm text-ink-soft">
@@ -159,6 +140,141 @@ function ViewerBody({ material, txtContent, txtError, isTxt }) {
       <a href={filePath} target="_blank" rel="noreferrer" download className="btn-primary mt-4 inline-flex">
         Open / Download {material.fileExtension?.toUpperCase() || type}
       </a>
+    </div>
+  );
+}
+
+function PdfViewer({ filePath, title }) {
+  const canvasRef = useRef(null);
+  const pdfDocRef = useRef(null);
+  const renderTaskRef = useRef(null);
+  const [pageNum, setPageNum] = useState(1);
+  const [numPages, setNumPages] = useState(0);
+  const [scale, setScale] = useState(1.2);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  // Load document
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    setPageNum(1);
+
+    const loadingTask = pdfjsLib.getDocument({
+      url: filePath,
+      cMapUrl: `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/cmaps/`,
+      cMapPacked: true,
+    });
+
+    loadingTask.promise
+      .then((doc) => {
+        if (cancelled) return;
+        pdfDocRef.current = doc;
+        setNumPages(doc.numPages);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("PDF Load Error:", err);
+          setError("Could not load this PDF.");
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      pdfDocRef.current?.destroy();
+      pdfDocRef.current = null;
+    };
+  }, [filePath]);
+
+  // Render active page
+  useEffect(() => {
+    if (!pdfDocRef.current) return;
+    let cancelled = false;
+
+    pdfDocRef.current.getPage(pageNum).then((page) => {
+      if (cancelled) return;
+      const viewport = page.getViewport({ scale });
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const context = canvas.getContext("2d");
+      
+      // Support high DPI / Mobile screens
+      const outputScale = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(viewport.width * outputScale);
+      canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.style.width = Math.floor(viewport.width) + "px";
+      canvas.style.height = Math.floor(viewport.height) + "px";
+
+      const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+
+      renderTaskRef.current?.cancel();
+      const task = page.render({ 
+        canvasContext: context, 
+        viewport,
+        transform 
+      });
+      renderTaskRef.current = task;
+      task.promise.catch(() => {
+        /* ignore cancelled rendering */
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pageNum, scale, numPages]);
+
+  if (error) return <p className="text-center text-sm text-red-600">{error}</p>;
+
+  return (
+    <div className="mx-auto flex max-w-5xl flex-col items-center gap-3">
+      <div className="flex flex-wrap items-center justify-center gap-3 rounded-md bg-canvas-card px-3 py-2 shadow-sm">
+        <button
+          type="button"
+          onClick={() => setPageNum((p) => Math.max(1, p - 1))}
+          disabled={pageNum <= 1}
+          className="btn-secondary text-sm disabled:opacity-40"
+        >
+          Prev
+        </button>
+        <span className="text-sm text-ink-soft">
+          Page {pageNum} of {numPages || "…"}
+        </span>
+        <button
+          type="button"
+          onClick={() => setPageNum((p) => Math.min(numPages, p + 1))}
+          disabled={pageNum >= numPages}
+          className="btn-secondary text-sm disabled:opacity-40"
+        >
+          Next
+        </button>
+        <span className="mx-1 h-4 w-px bg-brand-100" />
+        <button
+          type="button"
+          onClick={() => setScale((s) => Math.max(0.6, +(s - 0.2).toFixed(1)))}
+          className="btn-secondary text-sm"
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+        <span className="text-sm text-ink-soft">{Math.round(scale * 100)}%</span>
+        <button
+          type="button"
+          onClick={() => setScale((s) => Math.min(3, +(s + 0.2).toFixed(1)))}
+          className="btn-secondary text-sm"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+      </div>
+
+      <div className="w-full overflow-auto rounded-lg border border-brand-100 bg-canvas-sunk p-4">
+        {loading && <p className="text-center text-sm text-ink-faint">Loading {title}…</p>}
+        <canvas ref={canvasRef} className="mx-auto block shadow" />
+      </div>
     </div>
   );
 }
