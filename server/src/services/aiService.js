@@ -177,11 +177,21 @@ async function generateAssignmentContent(
   const system =
     "You draft school assignments for teachers to review and edit before publishing. " +
     "Respond ONLY with valid JSON, no preamble, no markdown fences, no explanation outside the JSON. " +
-    'Format: {"title":"...","instructions":"...","questions":[{"text":"...","type":"MCQ|TRUE_FALSE|FILL_BLANK|SHORT_ANSWER","marks":2,"expectedAnswer":"..."}]}. ' +
-    "The `instructions` field must read like a clean, teacher-written assignment sheet, not raw AI output: " +
-    "use Markdown — a short heading, then a brief 1-2 sentence overview paragraph, then clear numbered " +
-    "instructions/steps for the student (blank lines between items), and bullet points only where genuinely " +
-    "helpful (e.g. materials needed). Keep it concise and well spaced — no walls of text, no run-on paragraphs. " +
+    'Format: {"title":"...","instructions":"...","questions":[{"text":"...","type":"MCQ|TRUE_FALSE|FILL_BLANK|SHORT_ANSWER","marks":2,"expectedAnswer":"..."},{"text":"...","type":"...","marks":2,"expectedAnswer":"..."}]}. ' +
+    "Every object inside the `questions` array MUST be separated by a comma — never place two `{...}` objects " +
+    "back to back without a comma between them. Do not add any fields beyond text, type, marks, expectedAnswer " +
+    "(no `num`, no `id`, no extras). Use plain straight double-quote characters only — never typographic/curly " +
+    "quotes (\u201c \u201d) anywhere in the JSON, including inside string values. " +
+    "The `instructions` field must read like a clean, teacher-written assignment sheet, not raw AI output. " +
+    "Follow this exact structure inside the `instructions` string (use \\n\\n for blank lines between " +
+    "sections — do not run everything into one paragraph): " +
+    "(1) one Markdown heading line starting with '# ' naming the assignment, " +
+    "(2) a blank line, then a 1-2 sentence overview paragraph describing what the assignment covers, " +
+    "(3) a blank line, then a numbered list (1. 2. 3. each on its own line, with a blank line between " +
+    "numbered items) of clear instructions/steps for the student — e.g. how many questions to attempt, " +
+    "how to show working, submission expectations, " +
+    "(4) only if genuinely useful, a short bullet list of materials needed, each bullet on its own line. " +
+    "Keep the whole thing short and well spaced — 6-10 lines total, never one dense paragraph. " +
     "Question text itself stays in the `questions` array, not folded into `instructions`.";
   const typeLine = questionType === "MIXED" ? "a mix of question types" : `all questions of type ${questionType}`;
   const context = [subject ? `Subject: ${subject}` : null, cls ? `Class: ${cls}` : null].filter(Boolean).join(", ");
@@ -193,70 +203,93 @@ async function generateAssignmentContent(
   const numPredict = Math.min(STRUCTURED_HARD_CEILING, Math.max(NUM_PREDICT_STRUCTURED, questionCount * 180));
   const { text: raw } = await generateWithFallback(prompt, { system, temperature: 0.6, numPredict });
   try {
-    const parsed = parseJsonResponse(raw);
+    const parsed = parseAssignmentJson(raw);
     return {
       title: parsed.title || `Assignment: ${topic}`,
       instructions: parsed.instructions || "",
       questions: Array.isArray(parsed.questions) ? parsed.questions : [],
     };
-  } catch {
+  } catch (err) {
+    console.error("Assignment JSON parse failed:", err.message);
+    console.error("Faulty text trace:", raw);
     // Fall back to using the raw text as instructions rather than failing
     // outright — the teacher reviews and edits either way before publishing.
     return { title: `Assignment: ${topic}`, instructions: raw.trim(), questions: [] };
   }
 }
 
-// Robust JSON extraction: strips ```json fences (some providers/models wrap
-// structured output in them despite being told not to), and if there's
-// still leading/trailing prose around the JSON, extracts the outermost
-// {...} or [...] block rather than failing outright.
+// Shared cleanup: strips ```json fences (some providers/models wrap
+// structured output in them despite being told not to), isolates the
+// outermost {...} or [...] block if there's leading/trailing prose, fixes
+// accidental double-brace slips, and — importantly — repairs the most common
+// small-LLM mistake: emitting consecutive JSON objects inside an array
+// without a separating comma, e.g. `{...}\n{...}` instead of `{...},{...}`.
+// That comma-less pattern is invalid JSON and previously caused JSON.parse
+// to throw on otherwise-recoverable output.
+function extractJsonText(rawText) {
+  if (!rawText) {
+    throw new Error("Empty response received from AI model.");
+  }
+
+  let cleanText = rawText.trim();
+
+  // 1. Strip markdown fences if present
+  if (cleanText.startsWith("```")) {
+    cleanText = cleanText.replace(/^```(?:json)?/, "").replace(/```$/, "").trim();
+  }
+
+  // 2. Isolate JSON bounds
+  const firstBrace = cleanText.indexOf("{");
+  const firstBracket = cleanText.indexOf("[");
+
+  let startIndex = -1;
+  let endIndex = -1;
+  let expectedClose = "";
+
+  if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
+    startIndex = firstBracket;
+    endIndex = cleanText.lastIndexOf("]");
+    expectedClose = "]";
+  } else if (firstBrace !== -1) {
+    startIndex = firstBrace;
+    endIndex = cleanText.lastIndexOf("}");
+    expectedClose = "}";
+  }
+
+  if (startIndex !== -1) {
+    if (endIndex !== -1 && endIndex > startIndex) {
+      cleanText = cleanText.substring(startIndex, endIndex + 1);
+    } else {
+      cleanText = cleanText.substring(startIndex);
+      cleanText = cleanText.replace(/,?\s*\{\s*[^}]*$/, "");
+      cleanText += expectedClose;
+    }
+  }
+
+  // Fixes the double-brace mistake the AI sometimes makes on question items
+  cleanText = cleanText.replace(/\}\s*\}/g, "}"); // accidental }} -> }
+  cleanText = cleanText.replace(/\{\s*\{/g, "{"); // accidental {{ -> {
+
+  // Insert a missing comma between two objects that are adjacent with only
+  // whitespace/newlines between them: `}\n{` -> `},{`. Valid JSON never has
+  // `}{` back-to-back without a comma, so this is always a safe repair.
+  cleanText = cleanText.replace(/\}\s*\{/g, "},{");
+  // Same for adjacent array-closing/opening slips: `]\n[` -> `],[`.
+  cleanText = cleanText.replace(/\]\s*\[/g, "],[");
+
+  return cleanText;
+}
+
+// Robust JSON extraction for quiz questions specifically — parses, then
+// forces every item into the quiz-question schema (type/options/
+// correctAnswer/marks). Only use this for quiz generation; assignments have
+// a different top-level shape (title/instructions/questions) and must use
+// parseAssignmentJson below instead, or this will silently discard title
+// and instructions.
 function parseJsonResponse(rawText, fallbackErrorMessage) {
   try {
-    if (!rawText) {
-      throw new Error("Empty response received from AI model.");
-    }
+    const cleanText = extractJsonText(rawText);
 
-    let cleanText = rawText.trim();
-    
-    // 1. Strip markdown fences if present
-    if (cleanText.startsWith("```")) {
-      cleanText = cleanText.replace(/^```(?:json)?/, "").replace(/```$/, "").trim();
-    }
-    
-    // 2. Isolate JSON bounds
-    const firstBrace = cleanText.indexOf("{");
-    const firstBracket = cleanText.indexOf("[");
-    
-    let startIndex = -1;
-    let endIndex = -1;
-    let expectedClose = "";
-
-    if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
-      startIndex = firstBracket;
-      endIndex = cleanText.lastIndexOf("]");
-      expectedClose = "]";
-    } else if (firstBrace !== -1) {
-      startIndex = firstBrace;
-      endIndex = cleanText.lastIndexOf("}");
-      expectedClose = "}";
-    }
-    
-    if (startIndex !== -1) {
-      if (endIndex !== -1 && endIndex > startIndex) {
-        cleanText = cleanText.substring(startIndex, endIndex + 1);
-      } else {
-        cleanText = cleanText.substring(startIndex);
-        cleanText = cleanText.replace(/,?\s*\{\s*[^}]*$/, ""); 
-        cleanText += expectedClose;
-      }
-    }
-
-    // ======= ADD THIS TRANSFORMATION LAYER TO FIX THE }} SYNTAX BUG =======
-    // Fixes the double-brace mistake the AI is making on question items
-    cleanText = cleanText.replace(/\}\s*\}/g, "}"); // Converts any accidental }} back to }
-    cleanText = cleanText.replace(/\{\s*\{/g, "{"); // Converts any accidental {{ back to {
-    // =====================================================================
-    
     // 3. Initial JSON Parse
     const parsedData = JSON.parse(cleanText);
     
@@ -295,8 +328,104 @@ function parseJsonResponse(rawText, fallbackErrorMessage) {
   }
 }
 
+// Decodes a captured JSON string-literal body (the part between the outer
+// quotes) back into a real JS string, turning escapes like \n, \", \u201c
+// into their actual characters. The regexes below always capture content
+// that was already inside a `"..."` pair, so wrapping it back in quotes and
+// running it through JSON.parse is a safe, correct way to unescape it.
+function decodeJsonStringLiteral(captured) {
+  try {
+    return JSON.parse(`"${captured}"`);
+  } catch {
+    return captured;
+  }
+}
 
+// Regex-based field extraction — pulls "title", "instructions", or any
+// other top-level string field straight out of the raw text by key name,
+// completely independent of whether the surrounding braces/brackets are
+// balanced. Small local models reliably get individual key:"value" pairs
+// right even when they mangle the nesting around them (extra `{{`, a
+// missing `}`, a dropped comma, etc.), so anchoring on the field itself
+// sidesteps the whole brace-matching problem.
+function extractStringField(rawText, fieldName) {
+  const re = new RegExp(`"${fieldName}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "s");
+  const match = rawText.match(re);
+  return match ? decodeJsonStringLiteral(match[1]) : "";
+}
 
+// Pulls every question out of the raw text by scanning for the fixed
+// text -> type -> marks -> expectedAnswer key sequence our prompt asks the
+// model to follow, one question at a time, in order. This never touches
+// `{`/`}` at all, so it survives any amount of brace corruption around each
+// question object — the only thing that has to stay intact is the four
+// key:value pairs themselves, which is by far the part small models get
+// right most consistently.
+function extractQuestionsByFields(rawText) {
+  const re =
+    /"(?:text|question)"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"type"\s*:\s*"([A-Za-z_]+)"\s*,\s*"marks"\s*:\s*([0-9.]+)\s*,\s*"expectedAnswer"\s*:\s*"((?:\\.|[^"\\])*)"/gs;
+  const questions = [];
+  let match;
+  while ((match = re.exec(rawText)) !== null) {
+    const type = ["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].includes(match[2].toUpperCase())
+      ? match[2].toUpperCase()
+      : "SHORT_ANSWER";
+    questions.push({
+      text: decodeJsonStringLiteral(match[1]) || `Question ${questions.length + 1}`,
+      type,
+      marks: Number(match[3]) || 1,
+      expectedAnswer: decodeJsonStringLiteral(match[4]),
+    });
+  }
+  return questions;
+}
+
+// Extraction for assignments — preserves the {title, instructions,
+// questions} shape instead of flattening everything into the quiz-question
+// schema. Tries a strict full JSON.parse first (cheap and fully correct
+// whenever the model's braces/commas are actually valid). If that throws —
+// which local models do fairly often on nested nested nested question
+// arrays — it falls back to regex field-extraction (extractStringField /
+// extractQuestionsByFields above), which recovers the title, instructions,
+// and every question individually without ever needing the overall JSON to
+// be well-formed. Only if NEITHER approach finds anything usable do we give
+// up and let the caller fall back to dumping raw text.
+function parseAssignmentJson(rawText) {
+  try {
+    const cleanText = extractJsonText(rawText);
+    const parsedData = JSON.parse(cleanText);
+    if (Array.isArray(parsedData) || typeof parsedData !== "object" || parsedData === null) {
+      throw new Error("Expected a JSON object with title/instructions/questions, got something else.");
+    }
+    const questions = Array.isArray(parsedData.questions)
+      ? parsedData.questions.map((q, idx) => ({
+          text: q.text || q.question || `Question ${idx + 1}`,
+          type: ["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].includes(q.type?.toUpperCase())
+            ? q.type.toUpperCase()
+            : "SHORT_ANSWER",
+          marks: Number(q.marks) || 1,
+          expectedAnswer: q.expectedAnswer !== undefined ? String(q.expectedAnswer) : "",
+        }))
+      : [];
+    return {
+      title: typeof parsedData.title === "string" ? parsedData.title.trim() : "",
+      instructions: typeof parsedData.instructions === "string" ? parsedData.instructions.trim() : "",
+      questions,
+    };
+  } catch (err) {
+    console.warn("Strict assignment JSON parse failed, falling back to field extraction:", err.message);
+  }
+
+  const title = extractStringField(rawText, "title");
+  const instructions = extractStringField(rawText, "instructions");
+  const questions = extractQuestionsByFields(rawText);
+
+  if (!title && !instructions && questions.length === 0) {
+    throw new Error("Could not extract any assignment content from the AI response.");
+  }
+
+  return { title, instructions, questions };
+}
 
 module.exports = {
   isOllamaReachable,
@@ -308,5 +437,6 @@ module.exports = {
   generateQuizQuestions,
   generateAssignmentContent,
   buildSystemPrompt,
-  parseJsonResponse
+  parseJsonResponse,
+  parseAssignmentJson
 };
