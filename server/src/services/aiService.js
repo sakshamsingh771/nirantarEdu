@@ -148,14 +148,22 @@ async function generateQuizQuestions(topic, count = 5) {
     "You are a strict JSON data generator. Generate quiz questions for school students. " +
     "You must respond ONLY with a raw JSON array. Do not wrap the JSON in markdown code blocks like ```json. " +
     "Do not include any greeting text, intro, or outro text. Output nothing but valid JSON. " +
-    'Format: [{"type":"MCQ","text":"...","options":["A","B","C","D"],"correctAnswer":"0","marks":1}]. ' +
-    'Use type values: MCQ, TRUE_FALSE, FILL_BLANK, or SHORT_ANSWER.';
-    
+    'Format: [{"type":"MCQ","text":"...","options":["A","B","C","D"],"correctAnswer":"0","marks":1},' +
+    '{"type":"...","text":"...","options":[...],"correctAnswer":"...","marks":1}]. ' +
+    'Use type values: MCQ, TRUE_FALSE, FILL_BLANK, or SHORT_ANSWER. ' +
+    "Every object in the array MUST be separated by a comma — never place two `{...}` objects back to back " +
+    "without a comma between them, and never add extra fields beyond type, text, options, correctAnswer, marks.";
+
   const prompt = `Generate exactly ${count} quiz questions about the following topic: ${topic}. Verify that the JSON array is completely closed at the end.`;
 
-  // DANGEROUS UNDERFLOW FIXED: Ensure we allocate a massive token runway for large quiz requests
-  // so the response string never gets clipped short mid-generation.
-  const tokenRunway = Math.max(8000, count * 350); 
+  // Token budget scaled to the actual question count instead of a flat
+  // 8000-token floor for every request — that floor made even a 5-question
+  // quiz (which only needs ~1500-2000 tokens) allocate 4-5x more runway
+  // than necessary, and Ollama running on modest school-server hardware
+  // spends real wall-clock time per allocated token even when it stops
+  // early. A tighter, count-proportional budget is the main lever for
+  // cutting generation time without truncating legitimate output.
+  const tokenRunway = Math.max(1200, count * 320);
   const numPredict = Math.min(STRUCTURED_HARD_CEILING, tokenRunway);
 
   console.log(`[NirantarAi] Generating ${count} questions. Allocating ${numPredict} tokens...`);
@@ -280,12 +288,54 @@ function extractJsonText(rawText) {
   return cleanText;
 }
 
-// Robust JSON extraction for quiz questions specifically — parses, then
-// forces every item into the quiz-question schema (type/options/
-// correctAnswer/marks). Only use this for quiz generation; assignments have
-// a different top-level shape (title/instructions/questions) and must use
-// parseAssignmentJson below instead, or this will silently discard title
-// and instructions.
+// Regex-based fallback for quiz questions, mirroring extractQuestionsByFields
+// for assignments below: scans for the fixed type -> text -> options ->
+// correctAnswer -> marks key sequence directly, independent of whether the
+// surrounding array/object braces are balanced. Used only when a strict
+// JSON.parse of the whole array fails.
+function extractQuizQuestionsByFields(rawText) {
+  const re =
+    /"type"\s*:\s*"([A-Za-z_]+)"\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"options"\s*:\s*(\[(?:\\.|[^\]])*\])\s*,\s*"correctAnswer"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"marks"\s*:\s*([0-9.]+)/gs;
+  const questions = [];
+  let match;
+  while ((match = re.exec(rawText)) !== null) {
+    const correctedType = ["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].includes(match[1].toUpperCase())
+      ? match[1].toUpperCase()
+      : "MCQ";
+
+    let rawOptions;
+    try {
+      rawOptions = JSON.parse(match[3]);
+      if (!Array.isArray(rawOptions)) throw new Error("not an array");
+    } catch {
+      rawOptions = ["True", "False", "None", "All"];
+    }
+
+    let correctedAns = decodeJsonStringLiteral(match[4]).trim() || "0";
+    const matchingIndex = rawOptions.findIndex(
+      (opt) => String(opt).toLowerCase() === correctedAns.toLowerCase()
+    );
+    if (matchingIndex !== -1) correctedAns = String(matchingIndex);
+
+    questions.push({
+      type: correctedType,
+      text: decodeJsonStringLiteral(match[2]) || `Practice Question ${questions.length + 1}`,
+      options: rawOptions,
+      correctAnswer: correctedAns,
+      marks: Number(match[5]) || 1,
+    });
+  }
+  return questions;
+}
+
+// Robust JSON extraction for quiz questions. Tries a strict full JSON.parse
+// first (fast path — cheap and fully correct whenever the model's
+// braces/commas come out valid), and if that throws, falls back to
+// extractQuizQuestionsByFields above, which recovers each question
+// individually without needing the overall array to be well-formed JSON.
+// This mirrors parseAssignmentJson's two-tier strategy so a single stray
+// missing comma or brace slip from a small local model never has to
+// interrupt the teacher's workflow with a hard failure.
 function parseJsonResponse(rawText, fallbackErrorMessage) {
   try {
     const cleanText = extractJsonText(rawText);
@@ -322,6 +372,10 @@ function parseJsonResponse(rawText, fallbackErrorMessage) {
     return correctedQuizQuestions;
     
   } catch (err) {
+    console.warn("Strict quiz JSON parse failed, falling back to field extraction:", err.message);
+    const recovered = extractQuizQuestionsByFields(rawText);
+    if (recovered.length > 0) return recovered;
+
     console.error("Quiz Validation Exception Catch:", err.message);
     console.error("Faulty text trace:", rawText);
     throw new Error(fallbackErrorMessage || "AI returned an unparseable response. Try again.");

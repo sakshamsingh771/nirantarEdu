@@ -14,5 +14,5 @@ router.post(
   upload.enforcePerTypeLimit,
   ctrl.createMaterial
 );
-
+router.delete("/:id", requireRole("TEACHER", "ADMIN"), ctrl.deleteMaterial);
 module.exports = router;

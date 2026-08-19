@@ -2,6 +2,7 @@ const Material = require("../models/Material");
 const Notification = require("../models/Notification");
 const User = require("../models/User");
 const path = require("path");
+const fs = require("fs");
 
 // POST /api/materials  (teacher upload)
 async function createMaterial(req, res) {
@@ -83,5 +84,28 @@ async function getMaterial(req, res) {
   if (!material) return res.status(404).json({ message: "Material not found." });
   res.json({ material });
 }
+// DELETE /api/materials/:id  (teacher — must own the upload — or ADMIN)
+async function deleteMaterial(req, res) {
+  try {
+    const material = await Material.findOne({ _id: req.params.id, school: req.user.school });
+    if (!material) return res.status(404).json({ message: "Material not found." });
 
-module.exports = { createMaterial, listMaterials, getMaterial };
+    if (String(material.uploadedBy) !== String(req.user._id) && req.user.role !== "ADMIN") {
+      return res.status(403).json({ message: "You can only delete material you uploaded." });
+    }
+
+    if (material.filePath) {
+      const absPath = path.join(__dirname, "..", "..", material.filePath.replace(/^\/uploads\//, "uploads/"));
+      fs.unlink(absPath, () => {}); // best-effort cleanup
+    }
+
+    await material.deleteOne();
+    res.json({ message: "Material deleted." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Could not delete material." });
+  }
+}
+
+module.exports = { createMaterial, listMaterials, getMaterial, deleteMaterial };
+

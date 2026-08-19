@@ -23,6 +23,7 @@ export default function TeacherDashboard() {
   const [tab, setTab] = useState("Overview");
   const [analytics, setAnalytics] = useState(null);
   const [schoolConfig] = useSchoolConfig();
+  const [materialsRefreshKey, setMaterialsRefreshKey] = useState(0);
 
   useEffect(() => {
     api
@@ -61,7 +62,11 @@ export default function TeacherDashboard() {
         <Overview analytics={analytics} />
       </div>
       <div style={{ display: tab === "Materials" ? "" : "none" }}>
-        <UploadMaterial schoolConfig={schoolConfig} />
+        <UploadMaterial
+          schoolConfig={schoolConfig}
+          onUploaded={() => setMaterialsRefreshKey((k) => k + 1)}
+        />
+        <MyMaterials refreshKey={materialsRefreshKey} />
       </div>
       <div style={{ display: tab === "Assignments" ? "" : "none" }}>
         <ManageAssignments schoolConfig={schoolConfig} />
@@ -126,7 +131,7 @@ function formatMb(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
 
-function UploadMaterial({ schoolConfig }) {
+function UploadMaterial({ schoolConfig, onUploaded }) {
   const [form, setForm] = useState({
     title: "",
     description: "",
@@ -188,6 +193,7 @@ function UploadMaterial({ schoolConfig }) {
       });
       setFile(null);
       setFileError("");
+      onUploaded?.(); // Notify parent to refresh the materials list
     } catch (err) {
       // The backend returns a clear message for oversized/unsupported
       // files (413/400) instead of a generic failure — surface it as-is.
@@ -292,7 +298,88 @@ function UploadMaterial({ schoolConfig }) {
     </form>
   );
 }
+function MyMaterials({ refreshKey }) {
+  const { user } = useAuth();
+  const [materials, setMaterials] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [subjectFilter, setSubjectFilter] = useState("");
+  const [deletingId, setDeletingId] = useState(null);
+  const [error, setError] = useState("");
 
+  useEffect(() => {
+    setLoading(true);
+    api
+      .get("/materials")
+      .then((res) => {
+        const mine = (res.data.materials || []).filter(
+          (m) => String(m.uploadedBy) === String(user?._id),
+        );
+        setMaterials(mine);
+      })
+      .catch(() => setError("Could not load your materials."))
+      .finally(() => setLoading(false));
+  }, [refreshKey, user?._id]);
+
+  const subjects = [...new Set(materials.map((m) => m.subject).filter(Boolean))];
+  const visible = subjectFilter ? materials.filter((m) => m.subject === subjectFilter) : materials;
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("Delete this material? This cannot be undone.")) return;
+    setDeletingId(id);
+    setError("");
+    try {
+      await api.delete(`/materials/${id}`);
+      setMaterials((prev) => prev.filter((m) => m._id !== id));
+    } catch (err) {
+      setError(err.response?.data?.message || "Could not delete material.");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  if (loading) return <p className="mt-6 text-sm text-ink-faint">Loading your materials…</p>;
+
+  return (
+    <div className="mt-6 card space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="font-semibold text-brand-800">Your Uploaded Materials</h3>
+        {subjects.length > 1 && (
+          <select className="input-field w-auto" value={subjectFilter} onChange={(e) => setSubjectFilter(e.target.value)}>
+            <option value="">All subjects</option>
+            {subjects.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        )}
+      </div>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+      {visible.length === 0 ? (
+        <p className="text-sm text-ink-faint">No material uploaded yet.</p>
+      ) : (
+        <ul className="divide-y divide-brand-100">
+          {visible.map((m) => (
+            <li key={m._id} className="flex items-center justify-between gap-3 py-2">
+              <div>
+                <p className="text-sm font-medium text-ink">{m.title}</p>
+                <p className="text-xs text-ink-faint">
+                  {m.type} · {m.subject || "—"} · {m.class || "—"}
+                  {m.section ? ` (${m.section})` : ""}
+                </p>
+              </div>
+              <button
+                onClick={() => handleDelete(m._id)}
+                disabled={deletingId === m._id}
+                className="text-sm font-medium text-red-600 hover:underline disabled:opacity-50"
+              >
+                {deletingId === m._id ? "Deleting…" : "Delete"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 function ManageAssignments({ schoolConfig }) {
   const [mode, setMode] = useState("manual");
   const [form, setForm] = useState({
@@ -555,14 +642,23 @@ function ManageAssignments({ schoolConfig }) {
             via Ollama. Nothing is published until you review it below.
           </p>
 
-          <input
-            className="input-field"
-            placeholder="Topic (e.g. Quadratic Equations)"
-            value={aiParams.topic}
-            onChange={(e) =>
-              setAiParams({ ...aiParams, topic: e.target.value })
-            }
-          />
+          <div>
+            <label
+              htmlFor="assignment-ai-topic"
+              className="mb-1.5 block text-sm font-medium text-ink"
+            >
+              Topic
+            </label>
+            <input
+              id="assignment-ai-topic"
+              className="input-field"
+              placeholder="e.g. Quadratic Equations"
+              value={aiParams.topic}
+              onChange={(e) =>
+                setAiParams({ ...aiParams, topic: e.target.value })
+              }
+            />
+          </div>
 
           <ClassSectionSubjectSelect
             schoolConfig={schoolConfig}
@@ -1377,13 +1473,22 @@ function ManageQuizzes({ schoolConfig }) {
             Nirantar AI drafts the questions locally via Ollama — no internet
             needed.
           </p>
-          <input
-            className="input-field"
-            placeholder="Topic (e.g. Photosynthesis)"
-            value={aiForm.topic}
-            onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })}
-            required
-          />
+          <div>
+            <label
+              htmlFor="ai-topic"
+              className="mb-1.5 block text-sm font-medium text-ink"
+            >
+              Topic
+            </label>
+            <input
+              id="ai-topic"
+              className="input-field"
+              placeholder="e.g. Photosynthesis"
+              value={aiForm.topic}
+              onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })}
+              required
+            />
+          </div>
           <div>
             <label
               htmlFor="ai-count"
@@ -1404,26 +1509,45 @@ function ManageQuizzes({ schoolConfig }) {
             />
             {aiError && <p className="mt-1 text-sm text-red-600">{aiError}</p>}
           </div>
-          <input
-            className="input-field"
-            placeholder="Quiz title (optional)"
-            value={aiForm.title}
-            onChange={(e) => setAiForm({ ...aiForm, title: e.target.value })}
-          />
+          <div>
+            <label
+              htmlFor="ai-quiz-title"
+              className="mb-1.5 block text-sm font-medium text-ink"
+            >
+              Quiz title <span className="text-ink-faint">(optional)</span>
+            </label>
+            <input
+              id="ai-quiz-title"
+              className="input-field"
+              placeholder="Leave blank to use the AI-generated title"
+              value={aiForm.title}
+              onChange={(e) => setAiForm({ ...aiForm, title: e.target.value })}
+            />
+          </div>
           <ClassSectionSubjectSelect
             schoolConfig={schoolConfig}
             value={aiForm}
             onChange={setAiForm}
           />
-          <input
-            type="number"
-            className="input-field"
-            placeholder="Timer (min)"
-            value={aiForm.timerMinutes}
-            onChange={(e) =>
-              setAiForm({ ...aiForm, timerMinutes: e.target.value })
-            }
-          />
+          <div>
+            <label
+              htmlFor="ai-timer"
+              className="mb-1.5 block text-sm font-medium text-ink"
+            >
+              Timer (minutes)
+            </label>
+            <input
+              id="ai-timer"
+              type="number"
+              min={1}
+              className="input-field"
+              placeholder="e.g. 15"
+              value={aiForm.timerMinutes}
+              onChange={(e) =>
+                setAiForm({ ...aiForm, timerMinutes: e.target.value })
+              }
+            />
+          </div>
           <button className="btn-primary w-full" disabled={aiLoading}>
             {aiLoading ? "Generating…" : "Generate Quiz"}
           </button>

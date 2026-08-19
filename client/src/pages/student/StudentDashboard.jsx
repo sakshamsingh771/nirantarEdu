@@ -263,47 +263,71 @@ function materialBadge(m) {
 
 function MaterialsList({ materials }) {
   const [viewing, setViewing] = useState(null);
+  const [subjectFilter, setSubjectFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
 
   if (materials.length === 0) return <EmptyState text="No study material has been posted for your class yet." />;
+
+  const subjects = [...new Set(materials.map((m) => m.subject).filter(Boolean))];
+  const types = [...new Set(materials.map((m) => m.type).filter(Boolean))];
+  const filtered = materials.filter(
+    (m) => (!subjectFilter || m.subject === subjectFilter) && (!typeFilter || m.type === typeFilter),
+  );
+
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {materials.map((m) => (
-        <div key={m._id} className="card">
-          <span className="badge bg-brand-100 text-brand-700">{materialBadge(m)}</span>
-          <h3 className="mt-2 font-semibold text-ink">{m.title}</h3>
-          <p className="mt-1 text-sm text-ink-faint">{m.subject}</p>
+    <div>
+      <div className="mb-4 flex flex-wrap gap-3">
+        <select className="input-field w-auto" value={subjectFilter} onChange={(e) => setSubjectFilter(e.target.value)}>
+          <option value="">All subjects</option>
+          {subjects.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        <select className="input-field w-auto" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="">All types</option>
+          {types.map((t) => (
+            <option key={t} value={t}>{TYPE_LABELS[t] || t}</option>
+          ))}
+        </select>
+      </div>
+      {filtered.length === 0 ? (
+        <EmptyState text="No material matches these filters." />
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filtered.map((m) => (
+            <div key={m._id} className="card">
+              <span className="badge bg-brand-100 text-brand-700">{materialBadge(m)}</span>
+              <h3 className="mt-2 font-semibold text-ink">{m.title}</h3>
+              <p className="mt-1 text-sm text-ink-faint">{m.subject}</p>
 
-          {/* NOTE material has no file — the text itself is the content */}
-          {m.type === "NOTE" && m.textContent && (
-            <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm text-ink-soft">{m.textContent}</p>
-          )}
+              {m.type === "NOTE" && m.textContent && (
+                <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm text-ink-soft">{m.textContent}</p>
+              )}
 
-          {/* Small inline image thumbnail; full view still opens in-app */}
-          {m.type === "IMAGE" && m.filePath && (
-            <img src={m.filePath} alt={m.title} className="mt-3 max-h-32 w-full rounded-md object-cover" />
-          )}
+              {m.type === "IMAGE" && m.filePath && (
+                <img src={m.filePath} alt={m.title} className="mt-3 max-h-32 w-full rounded-md object-cover" />
+              )}
 
-          <div className="mt-3 flex flex-wrap gap-3">
-            {(m.filePath || (m.type === "NOTE" && m.textContent)) && (
-              <button onClick={() => setViewing(m)} className="text-sm font-medium text-brand-700 hover:underline">
-                Open →
-              </button>
-            )}
-            {m.filePath && (
-              <a href={m.filePath} download className="text-sm font-medium text-ink-faint hover:text-ink hover:underline">
-                Download
-              </a>
-            )}
-          </div>
+              <div className="mt-3 flex flex-wrap gap-3">
+                {(m.filePath || (m.type === "NOTE" && m.textContent)) && (
+                  <button onClick={() => setViewing(m)} className="text-sm font-medium text-brand-700 hover:underline">
+                    Open →
+                  </button>
+                )}
+                {m.filePath && (
+                  <a href={m.filePath} download className="text-sm font-medium text-ink-faint hover:text-ink hover:underline">
+                    Download
+                  </a>
+                )}
+              </div>
 
-          {/* A material can exist with no file yet (e.g. a video the teacher
-              hasn't uploaded locally) — say so plainly rather than showing
-              nothing or a broken link. */}
-          {!m.filePath && m.type !== "NOTE" && (
-            <p className="mt-3 text-sm text-ink-faint">File not uploaded yet.</p>
-          )}
+              {!m.filePath && m.type !== "NOTE" && (
+                <p className="mt-3 text-sm text-ink-faint">File not uploaded yet.</p>
+              )}
+            </div>
+          ))}
         </div>
-      ))}
+      )}
 
       {viewing && <MaterialViewerModal material={viewing} onClose={() => setViewing(null)} />}
     </div>
