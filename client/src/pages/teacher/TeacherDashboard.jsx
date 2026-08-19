@@ -1264,13 +1264,18 @@ function ManageQuizzes({ schoolConfig }) {
 
       {mode === "manual" ? (
         <form onSubmit={submitManual} className="card space-y-4">
-          <input
-            className="input-field"
-            placeholder="Quiz title"
-            value={manual.title}
-            onChange={(e) => setManual({ ...manual, title: e.target.value })}
-            required
-          />
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-ink">
+              Quiz Title
+            </label>
+            <input
+              className="input-field"
+              placeholder="Quiz title"
+              value={manual.title}
+              onChange={(e) => setManual({ ...manual, title: e.target.value })}
+              required
+            />
+          </div>
           <ClassSectionSubjectSelect
             schoolConfig={schoolConfig}
             value={manual}
@@ -1307,15 +1312,20 @@ function ManageQuizzes({ schoolConfig }) {
             </div>
           </div>
           {manual.timingMode === "OVERALL" ? (
-            <input
-              type="number"
-              className="input-field"
-              placeholder="Timer (min)"
-              value={manual.timerMinutes}
-              onChange={(e) =>
-                setManual({ ...manual, timerMinutes: e.target.value })
-              }
-            />
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-ink">
+                Timer (minutes)
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                placeholder="Timer (min)"
+                value={manual.timerMinutes}
+                onChange={(e) =>
+                  setManual({ ...manual, timerMinutes: e.target.value })
+                }
+              />
+            </div>
           ) : (
             <p className="text-sm text-ink-faint">
               Set each question's own time limit below — the quiz auto-advances
@@ -1335,21 +1345,26 @@ function ManageQuizzes({ schoolConfig }) {
                 <div
                   className={`grid flex-1 gap-2 ${manual.timingMode === "PER_QUESTION" ? "grid-cols-3" : "grid-cols-2"}`}
                 >
-                  <select
-                    className="input-field"
-                    value={q.type}
-                    onChange={(e) =>
-                      updateQuestion(idx, { type: e.target.value })
-                    }
-                  >
-                    {["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].map(
-                      (t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      ),
-                    )}
-                  </select>
+                  <div>
+                    <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                      Question Type
+                    </label>
+                    <select
+                      className="input-field"
+                      value={q.type}
+                      onChange={(e) =>
+                        updateQuestion(idx, { type: e.target.value })
+                      }
+                    >
+                      {["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].map(
+                        (t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </div>
                   <div>
                     <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
                       Marks (1–100)
@@ -1372,17 +1387,22 @@ function ManageQuizzes({ schoolConfig }) {
                     />
                   </div>
                   {manual.timingMode === "PER_QUESTION" && (
-                    <input
-                      type="number"
-                      className="input-field"
-                      placeholder="Seconds"
-                      value={q.timeLimitSeconds || 30}
-                      onChange={(e) =>
-                        updateQuestion(idx, {
-                          timeLimitSeconds: Number(e.target.value),
-                        })
-                      }
-                    />
+                    <div>
+                      <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                        Time (seconds)
+                      </label>
+                      <input
+                        type="number"
+                        className="input-field"
+                        placeholder="Seconds"
+                        value={q.timeLimitSeconds || 30}
+                        onChange={(e) =>
+                          updateQuestion(idx, {
+                            timeLimitSeconds: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
                   )}
                 </div>
                 <button
@@ -1393,37 +1413,52 @@ function ManageQuizzes({ schoolConfig }) {
                   Remove
                 </button>
               </div>
-              <input
-                className="input-field mt-2"
-                placeholder="Question text"
-                value={q.text}
-                onChange={(e) => updateQuestion(idx, { text: e.target.value })}
-              />
+              <div className="mt-2">
+                <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                  Question Text
+                </label>
+                <input
+                  className="input-field"
+                  placeholder="Question text"
+                  value={q.text}
+                  onChange={(e) => updateQuestion(idx, { text: e.target.value })}
+                />
+              </div>
               {q.type === "MCQ" && (
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  {q.options.map((opt, oi) => (
-                    <input
-                      key={oi}
-                      className="input-field"
-                      placeholder={`Option ${oi + 1}`}
-                      value={opt}
-                      onChange={(e) => {
-                        const options = [...q.options];
-                        options[oi] = e.target.value;
-                        updateQuestion(idx, { options });
-                      }}
-                    />
-                  ))}
+                <div className="mt-2">
+                  <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                    Answer Options
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {q.options.map((opt, oi) => (
+                      <input
+                        key={oi}
+                        className="input-field"
+                        placeholder={`Option ${oi + 1}`}
+                        value={opt}
+                        onChange={(e) => {
+                          const options = [...q.options];
+                          options[oi] = e.target.value;
+                          updateQuestion(idx, { options });
+                        }}
+                      />
+                    ))}
+                  </div>
                 </div>
               )}
-              <input
-                className="input-field mt-2"
-                placeholder="Correct answer (option index for MCQ, true/false, or text)"
-                value={q.correctAnswer}
-                onChange={(e) =>
-                  updateQuestion(idx, { correctAnswer: e.target.value })
-                }
-              />
+              <div className="mt-2">
+                <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                  Correct Answer
+                </label>
+                <input
+                  className="input-field"
+                  placeholder="Correct answer (option index for MCQ, true/false, or text)"
+                  value={q.correctAnswer}
+                  onChange={(e) =>
+                    updateQuestion(idx, { correctAnswer: e.target.value })
+                  }
+                />
+              </div>
             </div>
           ))}
           <div className="flex flex-wrap gap-2">
