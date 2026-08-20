@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import DashboardLayout from "../../layouts/DashboardLayout.jsx";
 import { useAuth } from "../../context/AuthContext.jsx";
 import api from "../../services/api.js";
@@ -19,24 +19,9 @@ export default function StudentDashboard() {
   const [notifications, setNotifications] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [aiGeneratedQuizData, setAiGeneratedQuizData] = useState(null);
-  const { active: quizActive, quizId: activeQuizId } = useActiveQuizSession();
+  const { active: quizActive, quizId: activeQuizId, refresh: refreshQuizSession } = useActiveQuizSession();
 
-  // The quiz being taken lives HERE, at the top of the dashboard — not
-  // inside QuizzesList — so it is never destroyed by a `tab === "Quizzes" &&`
-  // conditional unmounting/remounting QuizzesList when the student clicks
-  // another tab. Previously `active` was local state inside QuizzesList,
-  // so a stray tab click during the ~10s poll window (before the lock
-  // kicked in) unmounted QuizzesList and threw away the in-progress
-  // QuizRunner (including any unsubmitted answers) — that was the "quiz
-  // section becomes blank" bug. Now the runner is rendered unconditionally
-  // below whenever activeQuiz is set, regardless of which tab is selected.
   const [activeQuiz, setActiveQuiz] = useState(null);
-  // Tracks whether the current activeQuiz has already been submitted (result
-  // is showing). ROOT CAUSE FIX: tabs used to stay locked until the student
-  // clicked "Back to Quizzes" on the result screen, because quizLocked was
-  // derived from `!!activeQuiz` alone — activeQuiz stays set (on purpose,
-  // see note below) so the result screen keeps rendering. Locking must
-  // track "is a quiz actually in progress", not "is the quiz UI on screen".
   const [quizSubmitted, setQuizSubmitted] = useState(false);
   const quizLocked = quizActive || (!!activeQuiz && !quizSubmitted);
 
@@ -45,58 +30,62 @@ export default function StudentDashboard() {
     setActiveQuiz(q);
   };
 
+  // 🔑 RACE-CONDITION FIX: har store (materials/assignments/quizzes/
+  // notifications) ka apna "sequence number" hai. Jab bhi loadAndCache us
+  // store ke liye call hota hai, seq +1 hota hai aur woh number capture kar
+  // liya jaata hai. Jab response wapas aata hai — chahe deri se hi kyu na aaye
+  // — sirf tabhi state update hoga jab uska seq number abhi bhi "latest" ho.
+  // Agar iske resolve hone se pehle koi NAYA request usi store ke liye fire ho
+  // chuka hai, to ye purana response silently discard ho jaata hai — kabhi
+  // fresh data ko stale data se overwrite nahi karega.
+  const requestSeqRef = useRef({ materials: 0, assignments: 0, quizzes: 0, notifications: 0 });
 
-   useEffect(() => {
+  const loadAndCache = useCallback(async (url, storeName, setter) => {
+    const seq = ++requestSeqRef.current[storeName];
+    try {
+      const res = await api.get(url);
+      if (seq !== requestSeqRef.current[storeName]) return; // stale — ignore
+      const key = Object.keys(res.data)[0];
+      const data = res.data[key] || [];
+      setter(data);
+      await cacheItems(storeName, data);
+    } catch {
+      if (seq !== requestSeqRef.current[storeName]) return; // stale — ignore
+      const cached = await getCachedItems(storeName);
+      setter(cached);
+    }
+  }, []);
+
+  useEffect(() => {
     const handleGlobalQuizEnd = (event) => {
       if (event.key === "quiz_status_changed" && event.newValue?.startsWith("completed_")) {
-        console.log("[NirantarSync] Quiz submission detected on another tab. Dropping locks.");
-        
-        // 1. Instantly trip the submitted state variable parameters to true
         setQuizSubmitted(true);
-        
-        // 2. Clear active cached item frames so quizLocked forces down to false
         setActiveQuiz(null);
-        
-        // Keep the current tab. The quiz is finished, so navigation is unlocked
-        // immediately without forcing the student back to Overview.
       }
     };
-
     window.addEventListener("storage", handleGlobalQuizEnd);
     return () => window.removeEventListener("storage", handleGlobalQuizEnd);
   }, []);
 
-   useEffect(() => {
-    async function loadAndCache(url, storeName, setter) {
-      try {
-        const res = await api.get(url);
-        const key = Object.keys(res.data)[0];
-        setter(res.data[key]);
-        await cacheItems(storeName, res.data[key]);
-      } catch {
-        const cached = await getCachedItems(storeName);
-        setter(cached);
-      }
+  // Sirf lock -> unlock transition (quiz submit hone) par quizzes + analytics
+  // refresh karo. Materials/assignments quiz lene se change nahi hote,
+  // isliye unhe yaha touch nahi karte — kam requests, kam race risk.
+  const prevQuizLockedRef = useRef(quizLocked);
+  useEffect(() => {
+    const wasLocked = prevQuizLockedRef.current;
+    prevQuizLockedRef.current = quizLocked;
+    if (wasLocked && !quizLocked) {
+      loadAndCache("/quizzes", "quizzes", setQuizzes);
+      api.get("/analytics/student").then((res) => setAnalytics(res.data)).catch(() => {});
     }
-    
-    // Automatically query database sets to refresh view blocks when locks release
-    loadAndCache("/materials", "materials", setMaterials);
-    loadAndCache("/assignments", "assignments", setAssignments);
-    loadAndCache("/quizzes", "quizzes", setQuizzes);
-    loadAndCache("/notifications", "notifications", setNotifications);
-    
-    api
-      .get("/analytics/student")
-      .then((res) => setAnalytics(res.data))
-      .catch(() => {});
-  }, [quizLocked]); // 🧠 Re-runs automatically the exact instant quizLocked turns false!
+  }, [quizLocked, loadAndCache]);
 
   // A student mid-quiz must stay on the Quizzes tab
   useEffect(() => {
     if (quizLocked && tab !== "Quizzes") setTab("Quizzes");
   }, [quizLocked, tab]);
 
-  // Re-attach to an in-progress attempt after a refresh/new tab:
+  // Re-attach to an in-progress attempt after a refresh/new tab
   useEffect(() => {
     if (activeQuizId && !activeQuiz) {
       const match = quizzes.find((q) => q._id === activeQuizId);
@@ -104,40 +93,17 @@ export default function StudentDashboard() {
     }
   }, [activeQuizId, activeQuiz, quizzes]);
 
-  // Re-attach to an in-progress attempt after a refresh/new tab: the poll
-  // reports a server-side active attempt (quizId) but local activeQuiz
-  // state starts out null on a fresh page load, so resolve it once the
-  // quizzes list is available.
+  // 🔑 EK-HI mount effect — poora dashboard ka initial data source. Ye ab
+  // duplicate nahi hai kisi doosre effect se, aur loadAndCache ka sequence
+  // guard isse safe banata hai chahe StrictMode me dev mode ke andar
+  // effect do baar chale.
   useEffect(() => {
-    if (activeQuizId && !activeQuiz) {
-      const match = quizzes.find((q) => q._id === activeQuizId);
-      if (match) setActiveQuiz(match);
-    }
-  }, [activeQuizId, activeQuiz, quizzes]);
-
-  useEffect(() => {
-    // Try the local server first; if the LAN link is briefly down, fall back
-    // to whatever was cached in IndexedDB from the last successful load.
-    async function loadAndCache(url, storeName, setter) {
-      try {
-        const res = await api.get(url);
-        const key = Object.keys(res.data)[0];
-        setter(res.data[key]);
-        await cacheItems(storeName, res.data[key]);
-      } catch {
-        const cached = await getCachedItems(storeName);
-        setter(cached);
-      }
-    }
     loadAndCache("/materials", "materials", setMaterials);
     loadAndCache("/assignments", "assignments", setAssignments);
     loadAndCache("/quizzes", "quizzes", setQuizzes);
     loadAndCache("/notifications", "notifications", setNotifications);
-    api
-      .get("/analytics/student")
-      .then((res) => setAnalytics(res.data))
-      .catch(() => {});
-  }, []);
+    api.get("/analytics/student").then((res) => setAnalytics(res.data)).catch(() => {});
+  }, [loadAndCache]);
 
   return (
     <DashboardLayout title={`Welcome back, ${user?.fullName?.split(" ")[0] || "Student"}`}>
@@ -176,7 +142,10 @@ export default function StudentDashboard() {
       {activeQuiz ? (
         <QuizRunner
           quiz={activeQuiz}
-          onSubmitted={() => setQuizSubmitted(true)}
+          onSubmitted={() => {
+            setQuizSubmitted(true);
+            refreshQuizSession(); // 🔑 forces quizActive -> false immediately, no 3s poll wait
+          }}
           onExit={() => setActiveQuiz(null)}
         />
       ) : (
@@ -431,9 +400,22 @@ function QuizzesList({ quizzes, onStart }) {
           <p className="mt-1 text-sm text-ink-faint">
             {q.subject} · {q.timerMinutes} min
           </p>
-          <button onClick={() => onStart(q)} className="btn-primary mt-3 w-full">
-            Start Quiz
-          </button>
+
+          {q.attemptStatus === "COMPLETED" ? (
+            <div className="mt-3">
+              <span className="inline-block rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                ✓ Completed — {q.myScore}/{q.myTotalMarks}
+              </span>
+            </div>
+          ) : q.attemptStatus === "IN_PROGRESS" ? (
+            <button onClick={() => onStart(q)} className="btn-primary mt-3 w-full">
+              Resume Quiz
+            </button>
+          ) : (
+            <button onClick={() => onStart(q)} className="btn-primary mt-3 w-full">
+              Start Quiz
+            </button>
+          )}
         </div>
       ))}
     </div>

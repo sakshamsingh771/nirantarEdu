@@ -301,13 +301,19 @@ function UploadMaterial({ schoolConfig, onUploaded }) {
 function MyMaterials({ refreshKey }) {
   const { user } = useAuth();
   const [materials, setMaterials] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);       // sirf initial mount ke liye
+  const [refreshing, setRefreshing] = useState(false); // background refresh indicator
   const [subjectFilter, setSubjectFilter] = useState("");
   const [deletingId, setDeletingId] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setLoading(true);
+    // refreshKey === 0 => first mount hi hai, tabhi full-page loading dikhao.
+    // Baad ke refreshes (upload ke baad) par purana list screen pe rakho aur
+    // sirf ek chhota "refreshing" indicator dikhao — poori list wipe mat karo.
+    if (refreshKey === 0) setLoading(true);
+    else setRefreshing(true);
+
     api
       .get("/materials")
       .then((res) => {
@@ -315,9 +321,13 @@ function MyMaterials({ refreshKey }) {
           (m) => String(m.uploadedBy) === String(user?._id),
         );
         setMaterials(mine);
+        setError("");
       })
       .catch(() => setError("Could not load your materials."))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
   }, [refreshKey, user?._id]);
 
   const subjects = [...new Set(materials.map((m) => m.subject).filter(Boolean))];
@@ -342,7 +352,7 @@ function MyMaterials({ refreshKey }) {
   return (
     <div className="mt-6 card space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="font-semibold text-brand-800">Your Uploaded Materials</h3>
+        <h3 className="font-semibold text-brand-800">Your Uploaded Materials{refreshing && <span className="text-xs font-normal text-ink-faint">(refreshing…)</span>}</h3>
         {subjects.length > 1 && (
           <select className="input-field w-auto" value={subjectFilter} onChange={(e) => setSubjectFilter(e.target.value)}>
             <option value="">All subjects</option>

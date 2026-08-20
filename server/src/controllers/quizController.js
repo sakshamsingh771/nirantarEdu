@@ -270,6 +270,7 @@ async function aiGenerateQuiz(req, res) {
 // A student only sees quizzes for their class, and — when a quiz targeted a
 // specific section — only their own section. A quiz with no section set is
 // treated as visible to the whole class.
+
 async function listQuizzes(req, res) {
   const filter = { school: req.user.school, status: "PUBLISHED" };
   if (req.user.role === "STUDENT") {
@@ -279,6 +280,40 @@ async function listQuizzes(req, res) {
     filter.class = req.query.class;
   }
   const quizzes = await Quiz.find(filter).select("-questions.correctAnswer").sort({ createdAt: -1 });
+
+  // Student ke liye har quiz ke saath uska apna attempt-status/score attach
+  // karo — pehle ye kabhi bheja hi nahi jaata tha, isliye frontend pe
+  // "Completed" ya score kabhi dikhta hi nahi tha.
+  if (req.user.role === "STUDENT" && quizzes.length) {
+    const attempts = await QuizAttempt.find({
+      student: req.user._id,
+      quiz: { $in: quizzes.map((q) => q._id) },
+    }).sort({ startedAt: -1 });
+
+    // Ek student ka ek quiz pe latest attempt hi count hota hai
+    const latestByQuiz = new Map();
+    for (const a of attempts) {
+      const key = String(a.quiz);
+      if (!latestByQuiz.has(key)) latestByQuiz.set(key, a); // already sorted latest-first
+    }
+
+    const withStatus = quizzes.map((q) => {
+      const attempt = latestByQuiz.get(String(q._id));
+      const plain = q.toObject();
+      if (!attempt) {
+        plain.attemptStatus = "PENDING";
+      } else if (attempt.status === "COMPLETED") {
+        plain.attemptStatus = "COMPLETED";
+        plain.myScore = attempt.score;
+        plain.myTotalMarks = attempt.totalMarks;
+      } else {
+        plain.attemptStatus = "IN_PROGRESS";
+      }
+      return plain;
+    });
+    return res.json({ quizzes: withStatus });
+  }
+
   res.json({ quizzes });
 }
 
@@ -328,6 +363,23 @@ async function startAttempt(req, res) {
   // broken.
   if (attempt && !(await isAttemptStillActive(attempt))) {
     attempt = null;
+  }
+
+  // 🔑 Agar student ne already ye quiz COMPLETE kar rakha hai to naya attempt
+  // silently create mat karo — purana result ussi tarah dikhao. Retake sirf
+  // tab allowed hoga jab explicitly product requirement ho.
+  const completedAttempt = await QuizAttempt.findOne({
+    quiz: quiz._id,
+    student: req.user._id,
+    status: "COMPLETED",
+  }).sort({ completedAt: -1 });
+  if (completedAttempt && !attempt) {
+    return res.status(409).json({
+      message: "You have already submitted this quiz.",
+      alreadyCompleted: true,
+      score: completedAttempt.score,
+      totalMarks: completedAttempt.totalMarks,
+    });
   }
 
   if (!attempt) {
