@@ -9,6 +9,7 @@ import MarkdownMessage from "./MarkdownMessage.jsx";
 // same as any other sessionStorage data.
 const MAX_STORED_MESSAGES = 40;
 
+
 function storageKeyFor(namespace) {
   return `nirantaredu_ai_conversation_${namespace}`;
 }
