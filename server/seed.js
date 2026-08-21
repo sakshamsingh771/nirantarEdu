@@ -320,9 +320,9 @@ async function seed() {
       description: "Printable worksheet accompanying this week's assignment",
       subject: "English",
       class: "8",
-      type: "DOC",
+      type: "NOTE",
       fileExtension: "docx",
-      filePath: "/uploads/demo-english-assignment.docx",
+      textContent: "Write a 200-word paragraph about your favourite book. Submit by the given deadline.",
     },
     {
       school: school._id,
