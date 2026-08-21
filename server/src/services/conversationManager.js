@@ -37,10 +37,10 @@ async function getConversationContext(conversationId, user) {
 async function appendMessage(conversationId, user, namespace, message) {
   if (!conversationId) return null;
 
-  let conversation = await Conversation.findOneAndUpdates({ conversationId, user: user._id },
+  let conversation = await Conversation.findOneAndUpdate({ conversationId, user: user._id },
     {
       $setOnInsert:{conversationId,school:user.school,user:user._id,namespace},
-      $push:{message:message},
+      $push:{messages:message},
     },
     {upsert:true,new:true}
   );

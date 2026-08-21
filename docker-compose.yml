@@ -34,8 +34,12 @@ services:
     environment:
       MONGO_URI: mongodb://nirantar:nirantar_local_pw@mongodb:27017/nirantaredu?authSource=admin
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      GEMINI_API_KEY: ${AI_API_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    dns:
+    - 8.8.8.8
+    - 1.1.1.1  
     volumes:
       - uploads_data:/app/uploads
     networks:

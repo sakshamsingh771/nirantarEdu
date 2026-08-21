@@ -15,15 +15,21 @@ function shouldTryCloud() {
   return cloudProvider.isConfigured();
 }
 
-// A failure that should trigger a fallback to Ollama: timeouts, rate limits,
-// 5xx, and plain network/connection failures. NOT included: a well-formed
-// 4xx like a genuinely bad request — that's a bug, not an outage, so
-// retrying it against a different provider wouldn't help and would just
-// hide the real error. In practice the only 4xx this project sends is a
-// missing API key (401/403), which also isn't something Ollama can fix by
-// being tried instead — but we fall back anyway for those too, since a
-// misconfigured cloud key shouldn't take Nirantar AI down entirely when a
-// working local fallback exists.
+// Timeouts are the one failure mode that's genuinely worth retrying once —
+// a single slow round-trip on otherwise-fine school internet shouldn't
+// permanently demote that request to Ollama. Anything else (bad key, 4xx,
+// DNS failure) will just fail the same way again, so only timeouts get a
+// second attempt before we give up on cloud for this request.
+async function withOneRetryOnTimeout(attempt) {
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!err.isTimeout) throw err;
+    console.warn("[AI] Cloud request timed out once, retrying before falling back to Ollama");
+    return await attempt();
+  }
+}
+
 function isFallbackWorthy(err) {
   if (err.isTimeout || err.isRateLimited || err.isServerError) return true;
   if (!err.status) return true; // network-level failure (DNS, connection refused, etc.) — no HTTP status at all
@@ -36,9 +42,9 @@ function isFallbackWorthy(err) {
  * optional UI status indicator only, never fed back into the conversation.
  */
 async function generateWithFallback(prompt, opts = {}) {
-  if (shouldTryCloud()) {
+    if (shouldTryCloud()) {
     try {
-      const text = await cloudProvider.generate(prompt, opts);
+      const text = await withOneRetryOnTimeout(() => cloudProvider.generate(prompt, opts));
       return { text, provider: "cloud", model: cloudProvider.MODEL_NAME };
     } catch (err) {
       console.warn("[AI] Cloud provider failed, falling back to Ollama:", err.message);
@@ -77,9 +83,9 @@ async function generateWithFallback(prompt, opts = {}) {
  * corrupted one.
  */
 async function generateStreamWithFallback(prompt, opts = {}) {
-  if (shouldTryCloud()) {
+     if (shouldTryCloud()) {
     try {
-      const stream = await cloudProvider.generateStream(prompt, opts);
+      const stream = await withOneRetryOnTimeout(() => cloudProvider.generateStream(prompt, opts));
       return wrapWithFallbackOnEarlyFailure(stream, prompt, opts, "cloud", cloudProvider.MODEL_NAME);
     } catch (err) {
       // Failed before we even got a stream handle — the cleanest possible
