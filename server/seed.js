@@ -26,7 +26,7 @@ const CLASSES = ["6", "7", "8", "9", "10"];
 const SECTIONS = ["A", "B"];
 
 async function seed() {
-  await mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/nirantaredu");
+  await mongoose.connect(process.env.MONGO_URI ||process.env.MONGODB_URI|| "mongodb://localhost:27017/nirantaredu");
   console.log("Connected. Seeding demo data...");
 
   await Promise.all([
@@ -233,7 +233,7 @@ async function seed() {
       description: "Slide deck introducing algebraic expressions",
       subject: "Mathematics",
       class: "8",
-      type: "PPT",
+      type: "NOTE",
       fileExtension: "pptx",
       filePath: "/uploads/demo-algebra-presentation.pptx",
     },

@@ -58,7 +58,7 @@ async function main() {
   console.log("\n=== NirantarEdu Local Server Recovery Tool ===");
   console.log("This tool is for the authorized school server administrator only.\n");
 
-  await mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/nirantaredu");
+  await mongoose.connect(process.env.MONGO_URI ||process.env.MONGODB_URI|| "mongodb://localhost:27017/nirantaredu");
 
   const schoolCode = (await ask("School Code: ")).trim().toUpperCase();
   const school = await School.findOne({ schoolCode });

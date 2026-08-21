@@ -37,22 +37,17 @@ async function getConversationContext(conversationId, user) {
 async function appendMessage(conversationId, user, namespace, message) {
   if (!conversationId) return null;
 
-  let conversation = await Conversation.findOne({ conversationId, user: user._id });
-  if (!conversation) {
-    conversation = new Conversation({
-      conversationId,
-      school: user.school,
-      user: user._id,
-      namespace,
-      messages: [],
-    });
-  }
-
-  conversation.messages.push(message);
+  let conversation = await Conversation.findOneAndUpdates({ conversationId, user: user._id },
+    {
+      $setOnInsert:{conversationId,school:user.school,user:user._id,namespace},
+      $push:{message:message},
+    },
+    {upsert:true,new:true}
+  );
   if (conversation.messages.length > MAX_STORED_MESSAGES) {
     conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
+    await conversation.save();
   }
-  await conversation.save();
   return conversation;
 }
 
