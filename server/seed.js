@@ -276,9 +276,9 @@ async function seed() {
       description: "Slide deck for the current science unit",
       subject: "Science",
       class: "7",
-      type: "PPT",
-      fileExtension: "pptx",
-      filePath: "/uploads/demo-science-presentation.pptx",
+      type: "PDF",
+      fileExtension: "pdf",
+      filePath: "/uploads/demo-science-presentation.pdf",
     },
     {
       school: school._id,
