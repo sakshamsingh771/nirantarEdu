@@ -13,6 +13,7 @@ const TABS = [
   "Assignments",
   "Quizzes",
   "Submissions",
+  "My Class",
   "Nirantar AI",
 ];
 const MIN_QUESTIONS = 1;
@@ -76,6 +77,9 @@ export default function TeacherDashboard() {
       </div>
       <div style={{ display: tab === "Submissions" ? "" : "none" }}>
         <Submissions />
+      </div>
+         <div style={{ display: tab === "My Class" ? "" : "none" }}>
+        <MyClassResults />
       </div>
       <div style={{ display: tab === "Nirantar AI" ? "" : "none" }}>
         <TeacherAiTools />
@@ -1362,9 +1366,11 @@ function ManageQuizzes({ schoolConfig }) {
                     <select
                       className="input-field"
                       value={q.type}
-                      onChange={(e) =>
-                        updateQuestion(idx, { type: e.target.value })
-                      }
+                      onChange={(e) => {
+                        const newType = e.target.value;
+                        const resetAnswer = newType === "MCQ" ? "0" : "";
+                        updateQuestion(idx, { type: newType, correctAnswer: resetAnswer });
+                      }}
                     >
                       {["MCQ", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"].map(
                         (t) => (
@@ -1434,41 +1440,51 @@ function ManageQuizzes({ schoolConfig }) {
                   onChange={(e) => updateQuestion(idx, { text: e.target.value })}
                 />
               </div>
-              {q.type === "MCQ" && (
+                           {q.type === "MCQ" && (
                 <div className="mt-2">
                   <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
-                    Answer Options
+                    Answer Options — select the radio next to the correct one
                   </label>
                   <div className="grid grid-cols-2 gap-2">
                     {q.options.map((opt, oi) => (
-                      <input
-                        key={oi}
-                        className="input-field"
-                        placeholder={`Option ${oi + 1}`}
-                        value={opt}
-                        onChange={(e) => {
-                          const options = [...q.options];
-                          options[oi] = e.target.value;
-                          updateQuestion(idx, { options });
-                        }}
-                      />
+                      <div key={oi} className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name={`correct-${idx}`}
+                          checked={String(q.correctAnswer) === String(oi)}
+                          onChange={() => updateQuestion(idx, { correctAnswer: String(oi) })}
+                          title="Mark as the correct option"
+                        />
+                        <input
+                          className="input-field"
+                          placeholder={`Option ${oi + 1}`}
+                          value={opt}
+                          onChange={(e) => {
+                            const options = [...q.options];
+                            options[oi] = e.target.value;
+                            updateQuestion(idx, { options });
+                          }}
+                        />
+                      </div>
                     ))}
                   </div>
                 </div>
               )}
-              <div className="mt-2">
-                <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
-                  Correct Answer
-                </label>
-                <input
-                  className="input-field"
-                  placeholder="Correct answer (option index for MCQ, true/false, or text)"
-                  value={q.correctAnswer}
-                  onChange={(e) =>
-                    updateQuestion(idx, { correctAnswer: e.target.value })
-                  }
-                />
-              </div>
+              {q.type !== "MCQ" && (
+                <div className="mt-2">
+                  <label className="mb-0.5 block text-[11px] font-medium text-ink-faint">
+                    Correct Answer
+                  </label>
+                  <input
+                    className="input-field"
+                    placeholder="Correct answer (true/false, or exact text)"
+                    value={q.correctAnswer}
+                    onChange={(e) =>
+                      updateQuestion(idx, { correctAnswer: e.target.value })
+                    }
+                  />
+                </div>
+              )}
             </div>
           ))}
           <div className="flex flex-wrap gap-2">
@@ -1863,6 +1879,85 @@ function AssignmentSubmissionsTable({ meta, rows, onOpen }) {
                   >
                     Open
                   </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+// "My Class" tab — every student across THIS teacher's assigned classes
+// (User.teacherAssignments), with their overall quiz performance. Unlike
+// Submissions (one quiz at a time, any class), this is one consolidated
+// view scoped to the teacher's own students — no picking through quizzes
+// one-by-one to answer "how is my class doing".
+function MyClassResults() {
+  const [rows, setRows] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    api
+      .get("/quizzes/my-class-results")
+      .then((res) => setRows(res.data.rows))
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <p className="text-sm text-ink-faint">Loading…</p>;
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="card">
+        <p className="text-sm text-ink-faint">
+          No students found for your assigned classes yet. Check your class/section assignment with the school admin
+          if this looks wrong.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card overflow-x-auto">
+      <h3 className="mb-3 font-semibold text-brand-800">My Class — Quiz Performance</h3>
+      <table className="min-w-full text-left text-sm">
+        <thead>
+          <tr className="border-b border-brand-100 text-ink-faint">
+            <th className="py-2 pr-4">Student</th>
+            <th className="py-2 pr-4">ID</th>
+            <th className="py-2 pr-4">Class</th>
+            <th className="py-2 pr-4">Quizzes Completed</th>
+            <th className="py-2 pr-4">Average %</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.student._id} className="border-b border-brand-50">
+              <td className="py-2 pr-4 font-medium text-ink">{r.student.fullName}</td>
+              <td className="py-2 pr-4 text-ink-faint">{r.student.userId}</td>
+              <td className="py-2 pr-4 text-ink-faint">
+                {r.student.class}
+                {r.student.section ? ` ${r.student.section}` : ""}
+              </td>
+              <td className="py-2 pr-4">
+                {r.quizzesCompleted}/{r.quizzesTotal}
+              </td>
+              <td className="py-2 pr-4">
+                {r.averagePercentage === null ? (
+                  <span className="text-ink-faint">—</span>
+                ) : (
+                  <span
+                    className={
+                      r.averagePercentage >= 60
+                        ? "font-medium text-emerald-700"
+                        : r.averagePercentage >= 33
+                        ? "font-medium text-amber-700"
+                        : "font-medium text-red-700"
+                    }
+                  >
+                    {r.averagePercentage}%
+                  </span>
                 )}
               </td>
             </tr>

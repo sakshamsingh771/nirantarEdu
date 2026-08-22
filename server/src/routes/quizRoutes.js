@@ -7,6 +7,7 @@ router.use(requireAuth);
 router.get("/", ctrl.listQuizzes);
 router.get("/drafts", requireRole("TEACHER", "ADMIN"), ctrl.listDraftQuizzes);
 router.get("/active-session", requireRole("STUDENT"), ctrl.activeSession);
+router.get("/my-class-results", requireRole("TEACHER"), ctrl.myClassResults);
 router.get("/:id", ctrl.getQuiz);
 router.post("/", requireRole("TEACHER", "ADMIN"), ctrl.createQuiz);
 router.put("/:id", requireRole("TEACHER", "ADMIN"), ctrl.updateQuiz);

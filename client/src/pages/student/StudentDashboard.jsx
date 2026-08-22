@@ -162,12 +162,25 @@ export default function StudentDashboard() {
       {/* Rendered independently of `tab` so it can NEVER be unmounted by a
           tab switch — this is what keeps the active quiz visible instead of
           going blank if the student clicks another tab. */}
-      {activeQuiz ? (
+            {activeQuiz ? (
         <QuizRunner
           quiz={activeQuiz}
-          onSubmitted={() => {
+          onSubmitted={(result) => {
             setQuizSubmitted(true);
             refreshQuizSession(); // 🔑 forces quizActive -> false immediately, no 3s poll wait
+            // Update the just-submitted quiz's badge INSTANTLY from the
+            // result we already have in hand — don't wait for the
+            // /quizzes refetch (which still happens too, as a consistency
+            // backstop, but the student shouldn't have to wait on it).
+            if (result) {
+              setQuizzes((prev) =>
+                prev.map((q) =>
+                  q._id === activeQuiz._id
+                    ? { ...q, attemptStatus: "COMPLETED", myScore: result.score, myTotalMarks: result.totalMarks }
+                    : q
+                )
+              );
+            }
           }}
           onExit={() => setActiveQuiz(null)}
         />
@@ -541,9 +554,10 @@ function QuizRunner({ quiz, onExit, onSubmitted }) {
         answer: currentAnswer,
       });
       setCurrentAnswer("");
-      if (res.data.completed) {
-        setResult({ score: res.data.score, totalMarks: res.data.totalMarks });
-        onSubmitted?.(); // saved server-side — unlock other tabs immediately
+           if (res.data.completed) {
+        const finalResult = { score: res.data.score, totalMarks: res.data.totalMarks };
+        setResult(finalResult);
+        onSubmitted?.(finalResult); // saved server-side — unlock other tabs immediately
       } else {
         setCurrentIndex(res.data.nextQuestionIndex);
         setCurrentDeadline(new Date(res.data.currentQuestionDeadline));
@@ -563,9 +577,9 @@ function QuizRunner({ quiz, onExit, onSubmitted }) {
         attemptId,
         answers: Object.entries(answers).map(([questionId, answer]) => ({ questionId, answer })),
       };
-      const res = await api.post(`/quizzes/${quiz._id}/attempt/submit`, payload);
+           const res = await api.post(`/quizzes/${quiz._id}/attempt/submit`, payload);
       setResult(res.data);
-      onSubmitted?.(); // saved server-side — unlock other tabs immediately
+      onSubmitted?.(res.data); // saved server-side — unlock other tabs immediately
     } catch (err) {
       setError(err.response?.data?.message || "Could not submit the quiz.");
     } finally {

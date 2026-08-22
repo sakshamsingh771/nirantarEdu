@@ -566,6 +566,92 @@ async function submitAttempt(req, res) {
 // GET /api/quizzes/:id/results  (teacher) — every student targeted by this
 // quiz, whether they've attempted it or not, with score/status/timing so
 // the teacher can see who's pending as well as who's finished.
+
+// GET /api/quizzes/my-class-results (teacher)
+//
+// listQuizResults (below) shows one quiz at a time, for any class in the
+// school. This is the other direction: for THIS teacher's own assigned
+// classes (User.teacherAssignments — a teacher isn't auto-granted every
+// class), one consolidated table of every student's quiz performance
+// across all their quizzes, without picking through quizzes one-by-one.
+async function myClassResults(req, res) {
+  const assignments = req.user.teacherAssignments || [];
+  if (assignments.length === 0) return res.json({ rows: [] });
+
+  // Distinct {class, section} pairs this teacher can see. section: ""
+  // on an assignment means "every section of that class".
+  const seen = new Set();
+  const classSectionPairs = [];
+  for (const a of assignments) {
+    const key = `${a.class}|${a.section || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    classSectionPairs.push({ class: a.class, section: a.section || "" });
+  }
+  const classesTaught = [...new Set(classSectionPairs.map((p) => p.class))];
+
+  const students = await User.find({
+    school: req.user.school,
+    role: "STUDENT",
+    $or: classSectionPairs.map((p) => (p.section ? { class: p.class, section: p.section } : { class: p.class })),
+  }).select("fullName userId class section rollNumber");
+  if (students.length === 0) return res.json({ rows: [] });
+
+  const quizzes = await Quiz.find({
+    school: req.user.school,
+    status: "PUBLISHED",
+    class: { $in: classesTaught },
+  }).select("_id class section totalMarks");
+  const quizMap = new Map(quizzes.map((q) => [String(q._id), q]));
+
+  const attempts = await QuizAttempt.find({
+    school: req.user.school,
+    student: { $in: students.map((s) => s._id) },
+    quiz: { $in: quizzes.map((q) => q._id) },
+    status: "COMPLETED",
+  });
+  const attemptsByStudent = new Map();
+  for (const a of attempts) {
+    const key = String(a.student);
+    if (!attemptsByStudent.has(key)) attemptsByStudent.set(key, []);
+    attemptsByStudent.get(key).push(a);
+  }
+
+  const rows = students.map((student) => {
+    // Quizzes actually targeted at this student's exact class+section (or
+    // whole-class quizzes with no section restriction).
+    const applicable = quizzes.filter((q) => q.class === student.class && (!q.section || q.section === student.section));
+    const studentAttempts = attemptsByStudent.get(String(student._id)) || [];
+    const completedQuizIds = new Set(studentAttempts.map((a) => String(a.quiz)));
+    const quizzesCompleted = applicable.filter((q) => completedQuizIds.has(String(q._id))).length;
+
+    let totalScored = 0;
+    let totalPossible = 0;
+    for (const a of studentAttempts) {
+      const q = quizMap.get(String(a.quiz));
+      if (!q) continue;
+      totalScored += a.score || 0;
+      totalPossible += q.totalMarks || 0;
+    }
+    const averagePercentage = totalPossible > 0 ? Math.round((totalScored / totalPossible) * 1000) / 10 : null;
+
+    return {
+      student: {
+        _id: student._id,
+        fullName: student.fullName,
+        userId: student.userId,
+        class: student.class,
+        section: student.section,
+        rollNumber: student.rollNumber,
+      },
+      quizzesCompleted,
+      quizzesTotal: applicable.length,
+      averagePercentage,
+    };
+  });
+
+  res.json({ rows });
+}
 async function listQuizResults(req, res) {
   const quiz = await Quiz.findOne({ _id: req.params.id, school: req.user.school });
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
@@ -663,5 +749,6 @@ module.exports = {
   submitAttempt,
   activeSession,
   listQuizResults,
+  myClassResults,
   getAttemptDetail,
 };
