@@ -10,6 +10,12 @@ import NirantarAiChat from "../../components/NirantarAiChat.jsx";
 
 const TABS = ["Overview", "Materials", "Assignments", "Quizzes", "Nirantar AI", "Notifications", "My Requests"];
 
+// How often to silently re-fetch materials/assignments/notifications so a
+// teacher's new upload shows up without the student needing to refresh the
+// page. There's no websocket/SSE in this project, so polling is the
+// simplest fix; loadAndCache's sequence guard makes repeated calls safe.
+const CONTENT_POLL_MS = 20000;
+
 export default function StudentDashboard() {
   const { user } = useAuth();
   const [tab, setTab] = useState("Overview");
@@ -104,6 +110,23 @@ export default function StudentDashboard() {
     loadAndCache("/notifications", "notifications", setNotifications);
     api.get("/analytics/student").then((res) => setAnalytics(res.data)).catch(() => {});
   }, [loadAndCache]);
+
+  // 🔑 LIVE-UPDATE FIX: is project me koi websocket/SSE nahi hai, isliye
+  // teacher ke naye upload (material/assignment) ko dikhane ke liye har
+  // CONTENT_POLL_MS par silently re-fetch karte hai. loadAndCache ka
+  // sequence guard already safe hai (stale response discard ho jaata hai),
+  // isliye repeated calls se koi race condition nahi aata. Quiz ke dauraan
+  // (quizLocked) ye poll pause rehta hai — us waqt student ka dhyaan aur
+  // network dono quiz par hi centered rehna chahiye.
+  useEffect(() => {
+    if (quizLocked) return;
+    const interval = setInterval(() => {
+      loadAndCache("/materials", "materials", setMaterials);
+      loadAndCache("/assignments", "assignments", setAssignments);
+      loadAndCache("/notifications", "notifications", setNotifications);
+    }, CONTENT_POLL_MS);
+    return () => clearInterval(interval);
+  }, [quizLocked, loadAndCache]);
 
   return (
     <DashboardLayout title={`Welcome back, ${user?.fullName?.split(" ")[0] || "Student"}`}>

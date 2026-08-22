@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import MarkdownMessage from "./MarkdownMessage.jsx";
+import api from "../services/api.js";
+
+// How often to re-check GET /api/ai/status while the panel is open, so the
+// badge reflects reality (e.g. internet coming back, local Ollama going
+// down) without requiring the student/teacher to send a message first.
+const STATUS_POLL_MS = 15000;
 
 // Shared Nirantar AI chat panel used by both the Student and Teacher
 // dashboards. `storageKey` keeps each user's conversation separate (and
@@ -49,6 +55,17 @@ const PROVIDER_LABEL = {
   ollama: "Nirantar AI • Local AI",
 };
 
+// Same labels, used before any message has actually been answered — derived
+// from GET /api/ai/status (what WILL answer) rather than X-AI-Provider
+// (what DID answer). Kept visually distinct (outline vs filled) so it never
+// looks like a claim about a message that hasn't happened yet.
+const EXPECTED_LABEL = {
+  cloud: "Nirantar AI • Online",
+  ollama: "Nirantar AI • Local AI ready",
+  checking: "Nirantar AI • Checking…",
+  unavailable: "Nirantar AI • Unavailable",
+};
+
 export default function NirantarAiChat({
   storageNamespace,
   greeting,
@@ -61,7 +78,8 @@ export default function NirantarAiChat({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [lastProvider, setLastProvider] = useState(null); // "cloud" | "ollama" | null (not yet known)
+  const [lastProvider, setLastProvider] = useState(null); // "cloud" | "ollama" | null — set only once a real reply has come back
+  const [expectedProvider, setExpectedProvider] = useState("checking"); // "cloud" | "ollama" | "unavailable" | "checking" — from /api/ai/status, shown before the first reply
   const recognitionRef = useRef(null);
   const abortRef = useRef(null);
   const lastUserMessageRef = useRef("");
@@ -87,6 +105,41 @@ export default function NirantarAiChat({
       onQuizGenerated(latestMessage.quizQuestions);
     }
   }, [messages, onQuizGenerated]);
+
+  // Proactively show whether Nirantar AI is reachable — and via which
+  // provider — as soon as the panel mounts, instead of waiting for the
+  // student/teacher to send a message. Polls periodically so reconnecting
+  // (or losing) internet/local Ollama updates the badge live.
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkStatus = async () => {
+      try {
+        const res = await api.get("/ai/status");
+        if (cancelled) return;
+        const { localAI, cloudConfigured, providerMode } = res.data;
+        if (providerMode === "ollama") {
+          setExpectedProvider(localAI === "AVAILABLE" ? "ollama" : "unavailable");
+        } else if (cloudConfigured) {
+          // Cloud is configured and will be tried first; if it's down the
+          // request falls back to Ollama automatically, so only call it
+          // fully unavailable when neither is usable.
+          setExpectedProvider(localAI === "AVAILABLE" ? "cloud" : "unavailable");
+        } else {
+          setExpectedProvider(localAI === "AVAILABLE" ? "ollama" : "unavailable");
+        }
+      } catch {
+        if (!cancelled) setExpectedProvider("unavailable");
+      }
+    };
+
+    checkStatus();
+    const interval = setInterval(checkStatus, STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -268,7 +321,9 @@ export default function NirantarAiChat({
       <div className="flex items-center justify-between border-b border-brand-50 pb-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-ink">Nirantar AI</span>
-          {lastProvider && (
+          {lastProvider ? (
+            // A real message has been answered — this is ground truth, so it
+            // always wins over the status-check guess.
             <span
               className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
                 lastProvider === "cloud"
@@ -282,6 +337,21 @@ export default function NirantarAiChat({
               }
             >
               {PROVIDER_LABEL[lastProvider]}
+            </span>
+          ) : (
+            <span
+              className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                expectedProvider === "cloud"
+                  ? "bg-sage-100 text-sage-700"
+                  : expectedProvider === "ollama"
+                  ? "bg-brand-50 text-brand-700"
+                  : expectedProvider === "unavailable"
+                  ? "bg-red-50 text-red-700"
+                  : "bg-canvas-sunk text-ink-faint"
+              }`}
+              title="Based on the last status check — the actual reply may still fall back to a different provider"
+            >
+              {EXPECTED_LABEL[expectedProvider]}
             </span>
           )}
         </div>

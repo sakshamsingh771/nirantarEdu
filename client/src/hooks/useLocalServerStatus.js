@@ -48,8 +48,8 @@ export function useLocalServerStatus() {
     checkSchoolServer();
     checkInternet();
 
-    const serverInterval = setInterval(checkSchoolServer, 15000);
-    const internetInterval = setInterval(checkInternet, 15000);
+    const serverInterval = setInterval(checkSchoolServer, 5000);
+    const internetInterval = setInterval(checkInternet, 5000);
 
     // "offline" event turant trust karo — reliable hai (adapter genuinely
     // gaya). "online" event ka matlab sirf "adapter wapas aaya" hai, isliye
